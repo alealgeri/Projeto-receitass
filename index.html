@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Receitas com Custo</title>
+<meta name="description" content="Custos de ingredientes, receitas e fichas de produção proporcionais.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=IBM+Plex+Mono:wght@400;500;600&family=Public+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="css/estilo.css">
+</head>
+<body>
+<!-- inicio-corpo -->
+<header class="topo">
+  <div class="topo-in">
+    <div class="marca">
+      <span class="marca-nome">Receitas com Custo</span>
+      <span class="marca-mes" id="marca-mes"></span>
+    </div>
+    <button type="button" class="btn btn-fantasma" data-acao="abrir-dados">Dados e backup</button>
+  </div>
+  <nav class="abas" aria-label="Painéis">
+    <div class="abas-in">
+      <a href="#ingredientes" class="aba" data-aba="ingredientes"><span class="aba-num">1</span>Ingredientes</a>
+      <a href="#receitas" class="aba" data-aba="receitas"><span class="aba-num">2</span>Receitas</a>
+      <a href="#producao" class="aba" data-aba="producao"><span class="aba-num">3</span>Produção</a>
+    </div>
+  </nav>
+</header>
+
+<div class="faixa faixa-alerta" id="aviso-armazenamento" hidden>
+  <div class="faixa-in">Este navegador não está permitindo salvar dados. O que você cadastrar agora será perdido ao fechar a página.</div>
+</div>
+<div class="faixa faixa-exemplo" id="aviso-exemplo" hidden>
+  <div class="faixa-in">
+    <span>Você está vendo dados de exemplo (croissant). Edite à vontade ou apague para começar do zero.</span>
+    <button type="button" class="btn btn-p" data-acao="apagar-exemplos">Apagar exemplos</button>
+  </div>
+</div>
+
+<main class="principal" id="principal"></main>
+
+<dialog class="dialogo" id="dlg-ingrediente" aria-labelledby="dlg-ingrediente-titulo"></dialog>
+<dialog class="dialogo" id="dlg-ajuste" aria-labelledby="dlg-ajuste-titulo"></dialog>
+<dialog class="dialogo dialogo-estreito" id="dlg-dados" aria-labelledby="dlg-dados-titulo"></dialog>
+<dialog class="dialogo dialogo-estreito" id="dlg-confirmar" aria-labelledby="dlg-confirmar-titulo"></dialog>
+
+<div class="aviso-rapido" id="aviso-rapido" role="status" aria-live="polite"></div>
+<!-- fim-corpo -->
+<script src="js/calculos.js"></script>
+<script src="js/dados.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

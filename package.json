@@ -1,0 +1,12 @@
+{
+  "name": "receitas-com-custo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Custos de ingredientes, receitas e fichas de produção proporcionais.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
