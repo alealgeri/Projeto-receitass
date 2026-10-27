@@ -6,10 +6,12 @@
 (function (raiz) {
   'use strict';
 
-  const C = raiz.Calculos;
+  const C = raiz.Calculos || (typeof require === 'function' ? require('./calculos.js') : null);
   const CHAVE_DADOS = 'receitas-com-custo:v1';
   const CHAVE_TELA = 'receitas-com-custo:tela';
   const CHAVE_API = 'receitas-com-custo:chave-api';
+  const CHAVE_EQUIPE = 'receitas-com-custo:equipe:';
+  const CHAVE_CONVITE = 'receitas-com-custo:convite';
   const VERSAO = 1;
   const MEDIDAS = ['xicara', 'colher_sopa', 'colher_cha'];
 
@@ -223,6 +225,91 @@
     gravar(CHAVE_TELA, tela);
   }
 
+  /** Dados guardados neste aparelho, sem criar o exemplo (null se não houver). */
+  function lerLocal() {
+    const salvo = ler(CHAVE_DADOS);
+    if (!salvo) return null;
+    try {
+      return validar(salvo);
+    } catch (erro) {
+      return null;
+    }
+  }
+
+  /* ---------- Nuvem: o que mudou e cópia local de cada equipe ---------- */
+
+  const TABELAS = ['ingredientes', 'receitas'];
+
+  /** Retrato do que já está no servidor: { ingredientes: { id: json }, receitas: { id: json } }. */
+  function fotografar(dados) {
+    const foto = {};
+    for (const t of TABELAS) foto[t] = Object.fromEntries((dados[t] || []).map((doc) => [doc.id, JSON.stringify(doc)]));
+    return foto;
+  }
+
+  /** O que precisa ir para o servidor desde o último retrato: documentos novos ou alterados e ids apagados. */
+  function diferencas(foto, dados) {
+    const mudancas = { salvar: {}, apagar: {}, total: 0 };
+    for (const t of TABELAS) {
+      const antes = (foto && foto[t]) || {};
+      const atuais = dados[t] || [];
+      const ids = new Set(atuais.map((doc) => doc.id));
+      mudancas.salvar[t] = atuais.filter((doc) => antes[doc.id] !== JSON.stringify(doc));
+      mudancas.apagar[t] = Object.keys(antes).filter((id) => !ids.has(id));
+      mudancas.total += mudancas.salvar[t].length + mudancas.apagar[t].length;
+    }
+    return mudancas;
+  }
+
+  const chaveEquipe = (equipeId) => CHAVE_EQUIPE + equipeId;
+
+  /** Cópia local da equipe, para abrir rápido e sem internet: { dados, foto } ou null. */
+  function carregarCacheEquipe(equipeId) {
+    const c = ler(chaveEquipe(equipeId));
+    if (!c || typeof c !== 'object') return null;
+    try {
+      return { dados: validar(c.dados), foto: c.foto && typeof c.foto === 'object' ? c.foto : null };
+    } catch (erro) {
+      return null;
+    }
+  }
+
+  function salvarCacheEquipe(equipeId, cache) {
+    gravar(chaveEquipe(equipeId), cache);
+  }
+
+  /** Ao sair da conta: apaga as cópias das equipes deste aparelho. */
+  function apagarCachesNuvem() {
+    try {
+      const chaves = [];
+      for (let i = 0; i < raiz.localStorage.length; i++) {
+        const k = raiz.localStorage.key(i);
+        if (k && k.startsWith(CHAVE_EQUIPE)) chaves.push(k);
+      }
+      chaves.forEach((k) => raiz.localStorage.removeItem(k));
+    } catch (erro) {
+      armazenamentoOk = false;
+    }
+  }
+
+  /** Convite aberto por link, guardado até a pessoa entrar na conta. */
+  function lerConvite() {
+    const c = ler(CHAVE_CONVITE);
+    return typeof c === 'string' && /^[0-9a-f-]{36}$/i.test(c) ? c : null;
+  }
+
+  function guardarConvite(id) {
+    if (id) {
+      gravar(CHAVE_CONVITE, id);
+      return;
+    }
+    try {
+      raiz.localStorage.removeItem(CHAVE_CONVITE);
+    } catch (erro) {
+      armazenamentoOk = false;
+    }
+  }
+
   // A chave da API fica separada dos dados: não entra no backup nem é apagada com eles.
   function carregarChaveApi() {
     const c = ler(CHAVE_API);
@@ -249,6 +336,14 @@
     salvarTela,
     carregarChaveApi,
     salvarChaveApi,
+    lerLocal,
+    fotografar,
+    diferencas,
+    carregarCacheEquipe,
+    salvarCacheEquipe,
+    apagarCachesNuvem,
+    lerConvite,
+    guardarConvite,
     exemplo,
     vazio,
     validar,

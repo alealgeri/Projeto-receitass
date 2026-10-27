@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Receitas com Custo</title>
 <meta name="description" content="Custos de ingredientes, receitas e fichas de produção proporcionais.">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1c1d19" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Receitas">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icones/favicon-64.png">
+<link rel="apple-touch-icon" href="icones/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500..800&family=IBM+Plex+Mono:wght@400;500;600&family=Public+Sans:wght@400;500;600;700&display=swap">
@@ -17,6 +25,7 @@
     <div class="marca">
       <span class="marca-nome">Receitas com Custo</span>
       <span class="marca-mes" id="marca-mes"></span>
+      <span class="marca-equipe" id="marca-equipe" hidden></span>
     </div>
     <button type="button" class="btn btn-fantasma" data-acao="abrir-dados">Dados e backup</button>
   </div>
@@ -49,9 +58,11 @@
 
 <div class="aviso-rapido" id="aviso-rapido" role="status" aria-live="polite"></div>
 <!-- fim-corpo -->
+<script src="js/config.js"></script>
 <script src="js/calculos.js"></script>
 <script src="js/leitura.js"></script>
 <script src="js/dados.js"></script>
+<script src="js/nuvem.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

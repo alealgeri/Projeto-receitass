@@ -9,13 +9,16 @@
   const C = window.Calculos;
   const D = window.Dados;
   const L = window.Leitura;
+  const N = window.Nuvem;
   const ABAS = ['ingredientes', 'receitas', 'producao'];
   const MES_ATUAL = C.mesDe(new Date());
   const ATALHOS = [0.5, 1, 1.5, 2, 3];
+  // Com o Supabase configurado em js/config.js, o app pede login e guarda os dados da equipe na nuvem.
+  const MODO_NUVEM = Boolean(N && N.ativa());
 
   /* ---------- Estado ---------- */
 
-  let dados = D.carregar(MES_ATUAL);
+  let dados = MODO_NUVEM ? D.vazio() : D.carregar(MES_ATUAL);
   const tela = D.carregarTela();
   const primeiraVisita = !tela.aba;
 
@@ -30,6 +33,23 @@
     ajuste: null, // rascunho do diálogo de ajuste
     producaoId: typeof tela.producaoId === 'string' ? tela.producaoId : null,
     producao: limparProducao(tela.producao), // { idReceita: { mult, rend, ajustes } }
+    nuvem: MODO_NUVEM ? {
+      fase: 'carregando', // carregando | erro | entrada | equipe | convite | pronto
+      mensagem: '',
+      usuario: null, // { id, email }
+      equipes: [], // [{ id, nome, papel }]
+      equipe: null, // equipe aberta
+      foto: null, // retrato do que já está no servidor (Dados.fotografar)
+      status: 'ok', // ok | pendente | enviando | offline | erro
+      erroEnvio: '',
+      sincronizando: false,
+      repetir: false,
+      ultimaCarga: 0,
+      entrada: { modo: 'entrar', email: '', erro: '', info: '' }, // entrar | cadastrar | recuperar | nova-senha | confirmar
+      convite: null, // { id, equipe, email, expirado }
+      voltarPara: null, // equipe a reabrir ao desistir de criar outra
+      painel: null, // membros e convites carregados no diálogo
+    } : null,
   };
 
   function abaInicial() {
@@ -119,12 +139,27 @@
   }
 
   function salvarDados() {
-    D.salvar(dados);
+    if (MODO_NUVEM) {
+      const nv = estado.nuvem;
+      if (nv.equipe) {
+        D.salvarCacheEquipe(nv.equipe.id, { dados, foto: nv.foto });
+        definirStatus('pendente');
+        agendarEnvio();
+      }
+    } else {
+      D.salvar(dados);
+    }
     atualizarFaixas();
   }
 
   function salvarTela() {
-    D.salvarTela({ aba: estado.aba, producaoId: estado.producaoId, producao: estado.producao });
+    D.salvarTela({
+      aba: estado.aba,
+      producaoId: estado.producaoId,
+      producao: estado.producao,
+      // Última equipe aberta, para reabrir (inclusive sem internet).
+      equipe: MODO_NUVEM && estado.nuvem.equipe ? estado.nuvem.equipe : tela.equipe || null,
+    });
   }
 
   /** Re-renderiza mantendo o foco e o cursor no campo em que a pessoa está digitando. */
@@ -207,11 +242,23 @@
   /* ---------- Estrutura ---------- */
 
   function atualizarFaixas() {
-    $('#aviso-exemplo').hidden = !temExemplos();
+    const pronto = !MODO_NUVEM || estado.nuvem.fase === 'pronto';
+    $('#aviso-exemplo').hidden = !pronto || !temExemplos();
     $('#aviso-armazenamento').hidden = D.armazenamentoDisponivel();
   }
 
   function render() {
+    const pronto = !MODO_NUVEM || estado.nuvem.fase === 'pronto';
+    $('.abas').hidden = !pronto;
+    $('[data-acao="abrir-dados"]').hidden = !pronto;
+    if (MODO_NUVEM) atualizarCabecaNuvem();
+    atualizarFaixas();
+    if (!pronto) {
+      manterFoco(() => {
+        $('#principal').innerHTML = telaNuvem();
+      });
+      return;
+    }
     $$('.aba').forEach((a) => a.setAttribute('aria-current', a.dataset.aba === estado.aba ? 'page' : 'false'));
     let html;
     if (estado.aba === 'ingredientes') html = telaIngredientes();
@@ -1885,32 +1932,789 @@
   }
 
   /* =====================================================================
+   * Nuvem: login, equipes e sincronização
+   * ===================================================================== */
+
+  const TEXTO_STATUS = {
+    ok: 'Salvo na nuvem',
+    pendente: 'Alterações a enviar',
+    enviando: 'Salvando…',
+    offline: 'Sem conexão: envia depois',
+    erro: 'Erro ao salvar',
+  };
+
+  function enderecoDoApp(convite) {
+    return location.origin + location.pathname + (convite ? '?convite=' + convite : '');
+  }
+
+  /** Link de convite aberto: guarda o convite até a pessoa entrar na conta. */
+  function lerConviteDaUrl() {
+    try {
+      const parametros = new URLSearchParams(location.search);
+      const id = parametros.get('convite');
+      if (id && /^[0-9a-f-]{36}$/i.test(id)) D.guardarConvite(id);
+      if (parametros.has('convite')) history.replaceState(null, '', location.pathname + location.hash);
+    } catch (erro) {
+      /* endereço sem parâmetros */
+    }
+  }
+
+  function ajustarProducaoId() {
+    if (estado.producaoId && receita(estado.producaoId)) return;
+    estado.producaoId = dados.receitas.length ? porNome(dados.receitas)[0].id : null;
+  }
+
+  async function iniciarNuvem() {
+    const nv = estado.nuvem;
+    lerConviteDaUrl();
+    const recuperandoSenha = /type=recovery/.test(location.hash);
+    nv.fase = 'carregando';
+    render();
+    try {
+      const sessao = await N.iniciar(aoMudarSessao);
+      if (recuperandoSenha && sessao) {
+        mostrarEntrada('nova-senha');
+        return;
+      }
+      await aposEntrar(sessao);
+    } catch (e) {
+      nv.fase = 'erro';
+      nv.mensagem = e.message;
+      render();
+    }
+  }
+
+  function aoMudarSessao(evento) {
+    // A biblioteca pede para não chamar o Supabase dentro deste aviso: decide logo depois.
+    if (evento === 'PASSWORD_RECOVERY') {
+      setTimeout(() => mostrarEntrada('nova-senha'), 0);
+    } else if (evento === 'SIGNED_OUT' && estado.nuvem.fase === 'pronto') {
+      setTimeout(() => sessaoEncerrada('Sua sessão terminou. Entre de novo.'), 0);
+    }
+  }
+
+  function mostrarEntrada(modo, extras = {}) {
+    const nv = estado.nuvem;
+    nv.fase = 'entrada';
+    nv.entrada = { ...nv.entrada, modo, erro: '', info: '', ...extras };
+    render();
+    const campo = $('#entrada-email') || $('#entrada-senha');
+    if (campo && !campo.value) campo.focus();
+  }
+
+  async function aposEntrar(sessao) {
+    const nv = estado.nuvem;
+    if (!sessao) {
+      mostrarEntrada(['entrar', 'cadastrar', 'recuperar', 'confirmar'].includes(nv.entrada.modo) ? nv.entrada.modo : 'entrar');
+      return;
+    }
+    nv.usuario = { id: sessao.user.id, email: sessao.user.email || '' };
+    const conviteId = D.lerConvite();
+    if (conviteId) {
+      try {
+        const convite = await N.verConvite(conviteId);
+        if (convite) {
+          nv.convite = { id: conviteId, erro: '', ...convite };
+          nv.fase = 'convite';
+          render();
+          return;
+        }
+        D.guardarConvite(null);
+      } catch (e) {
+        if (e.codigo !== 'conexao') D.guardarConvite(null);
+      }
+    }
+    await carregarEquipes(tela.equipe && tela.equipe.id);
+  }
+
+  async function carregarEquipes(preferida) {
+    const nv = estado.nuvem;
+    nv.fase = 'carregando';
+    render();
+    try {
+      nv.equipes = await N.minhasEquipes();
+    } catch (e) {
+      // Sem internet: abre a última equipe guardada neste aparelho.
+      const ultima = tela.equipe;
+      const cache = e.codigo === 'conexao' && ultima ? D.carregarCacheEquipe(ultima.id) : null;
+      if (cache) {
+        nv.equipes = [ultima];
+        abrirDoCache(ultima, cache);
+        definirStatus('offline');
+        return;
+      }
+      if (e.codigo === 'sessao') return sessaoEncerrada(e.message);
+      nv.fase = 'erro';
+      nv.mensagem = e.message;
+      render();
+      return;
+    }
+    if (!nv.equipes.length) {
+      nv.fase = 'equipe';
+      nv.mensagem = '';
+      render();
+      return;
+    }
+    await abrirEquipe(nv.equipes.find((eq) => eq.id === preferida) || nv.equipes[0]);
+  }
+
+  function abrirDoCache(eq, cache) {
+    const nv = estado.nuvem;
+    nv.equipe = eq;
+    dados = cache ? cache.dados : D.vazio();
+    nv.foto = cache ? cache.foto : null;
+    estado.receita = null;
+    estado.mensal = null;
+    estado.importacao = null;
+    ajustarProducaoId();
+    nv.fase = cache ? 'pronto' : 'carregando';
+    salvarTela();
+    render();
+  }
+
+  async function abrirEquipe(eq) {
+    const nv = estado.nuvem;
+    const cache = D.carregarCacheEquipe(eq.id);
+    abrirDoCache(eq, cache);
+    await sincronizar(true);
+    if (nv.equipe !== eq || nv.fase === 'pronto') return;
+    if (nv.ultimaCarga) {
+      nv.fase = 'pronto';
+      render();
+    } else {
+      nv.fase = 'erro';
+      nv.mensagem = 'Sem conexão para abrir a equipe pela primeira vez neste aparelho. Confira a internet e tente de novo.';
+      render();
+    }
+  }
+
+  function definirStatus(status, erroEnvio = '') {
+    estado.nuvem.status = status;
+    estado.nuvem.erroEnvio = erroEnvio;
+    atualizarCabecaNuvem();
+  }
+
+  function atualizarCabecaNuvem() {
+    const nv = estado.nuvem;
+    const el = $('#marca-equipe');
+    const pronto = nv.fase === 'pronto' && nv.equipe;
+    el.hidden = !pronto;
+    if (!pronto) return;
+    el.innerHTML = `<span class="equipe-nome">${esc(nv.equipe.nome)}</span>
+      <button type="button" class="status-nuvem status-${nv.status}" data-acao="sincronizar" title="${esc(nv.erroEnvio || 'Toque para atualizar agora')}"><i aria-hidden="true"></i>${TEXTO_STATUS[nv.status]}</button>`;
+  }
+
+  let temporizadorEnvio = null;
+  function agendarEnvio() {
+    clearTimeout(temporizadorEnvio);
+    temporizadorEnvio = setTimeout(() => sincronizar(false), 700);
+  }
+
+  /**
+   * Envia o que mudou desde o último retrato do servidor e, com `puxar`, traz o que a
+   * equipe alterou em outros aparelhos. Vale a última gravação de cada ingrediente ou receita.
+   */
+  async function sincronizar(puxar) {
+    const nv = estado.nuvem;
+    const eq = nv.equipe;
+    if (!eq) return;
+    if (nv.sincronizando) {
+      nv.repetir = true;
+      nv.repetirPuxando = nv.repetirPuxando || puxar;
+      return;
+    }
+    nv.sincronizando = true;
+    try {
+      const mudancas = D.diferencas(nv.foto, dados);
+      if (mudancas.total) {
+        definirStatus('enviando');
+        const fotoEnviada = D.fotografar(dados);
+        await N.enviarMudancas(eq.id, mudancas);
+        if (nv.equipe !== eq) return;
+        nv.foto = fotoEnviada;
+      }
+      if (puxar) {
+        const servidor = D.validar(await N.carregarDados(eq.id));
+        if (nv.equipe !== eq) return;
+        nv.ultimaCarga = Date.now();
+        if (D.diferencas(nv.foto, dados).total === 0) {
+          const mudou = JSON.stringify(servidor) !== JSON.stringify(dados);
+          dados = servidor;
+          nv.foto = D.fotografar(servidor);
+          if (mudou && nv.fase === 'pronto') {
+            ajustarProducaoId();
+            render();
+          }
+        } else {
+          nv.repetir = true; // alguém digitou enquanto carregava: envia de novo
+        }
+      }
+      D.salvarCacheEquipe(eq.id, { dados, foto: nv.foto });
+      definirStatus(D.diferencas(nv.foto, dados).total ? 'pendente' : 'ok');
+    } catch (e) {
+      if (e.codigo === 'conexao') definirStatus('offline');
+      else if (e.codigo === 'sessao') sessaoEncerrada(e.message);
+      else definirStatus('erro', e.message);
+    } finally {
+      nv.sincronizando = false;
+      if (nv.repetir) {
+        const puxando = nv.repetirPuxando;
+        nv.repetir = false;
+        nv.repetirPuxando = false;
+        setTimeout(() => sincronizar(puxando), 300);
+      }
+    }
+  }
+
+  /** Sessão expirada: volta para o login, guardando as alterações pendentes neste aparelho. */
+  function sessaoEncerrada(mensagem) {
+    const nv = estado.nuvem;
+    if (nv.equipe) D.salvarCacheEquipe(nv.equipe.id, { dados, foto: nv.foto });
+    nv.equipe = null;
+    nv.usuario = null;
+    dados = D.vazio();
+    nv.foto = null;
+    mostrarEntrada('entrar', { info: mensagem });
+  }
+
+  async function sairDaConta() {
+    const nv = estado.nuvem;
+    const pendentes = nv.equipe ? D.diferencas(nv.foto, dados).total : 0;
+    if (pendentes) {
+      const ok = await confirmar({
+        titulo: 'Sair com alterações não enviadas?',
+        texto: `${pendentes} ${plural(pendentes, 'alteração ainda não chegou', 'alterações ainda não chegaram')} à nuvem e ${plural(pendentes, 'será perdida', 'serão perdidas')}.`,
+        botao: 'Sair assim mesmo',
+        perigo: true,
+      });
+      if (!ok) return;
+    }
+    fecharDialogo('#dlg-dados');
+    nv.fase = 'entrada';
+    try {
+      await N.sair();
+    } catch (e) {
+      /* sai deste aparelho de qualquer jeito */
+    }
+    D.apagarCachesNuvem();
+    nv.equipe = null;
+    nv.equipes = [];
+    nv.usuario = null;
+    nv.foto = null;
+    nv.convite = null;
+    dados = D.vazio();
+    tela.equipe = null;
+    salvarTela();
+    mostrarEntrada('entrar', { info: 'Você saiu da conta neste aparelho.' });
+  }
+
+  /* ---------- Telas de entrada ---------- */
+
+  function telaNuvem() {
+    const nv = estado.nuvem;
+    if (nv.fase === 'carregando') {
+      return `<section class="painel nuvem-tela"><div class="cartao lendo" role="status">
+        <span class="girando" aria-hidden="true"></span>
+        <div><strong>Abrindo…</strong><p class="sub">${nv.equipe ? 'Carregando os dados da equipe.' : 'Conferindo sua conta.'}</p></div>
+      </div></section>`;
+    }
+    if (nv.fase === 'erro') {
+      return `<section class="painel nuvem-tela"><div class="cartao entrada">
+        <h1>Não foi possível abrir</h1>
+        <p class="erro-bloco" role="alert">${esc(nv.mensagem)}</p>
+        <div class="acoes"><button type="button" class="btn btn-primario" data-acao="tentar-nuvem">Tentar de novo</button></div>
+      </div></section>`;
+    }
+    if (nv.fase === 'entrada') return telaEntrada();
+    if (nv.fase === 'convite') return telaConvite();
+    return telaCriarEquipe();
+  }
+
+  function telaEntrada() {
+    const en = estado.nuvem.entrada;
+    const temConvite = Boolean(D.lerConvite());
+    if (en.modo === 'confirmar') {
+      return `<section class="painel nuvem-tela"><div class="cartao entrada">
+        <h1>Confirme seu e-mail</h1>
+        <p class="sub">Enviamos um link de confirmação para <strong>${esc(en.email)}</strong>. Abra o e-mail e toque no link. Depois, entre com seu e-mail e senha.</p>
+        <p class="dica">Não chegou em alguns minutos? Procure na caixa de spam.</p>
+        <div class="acoes"><button type="button" class="btn btn-primario" data-acao="modo-entrada" data-modo="entrar">Já confirmei, entrar</button></div>
+      </div></section>`;
+    }
+    const textos = {
+      entrar: ['Entrar', 'Seus ingredientes, preços e receitas ficam salvos na nuvem e aparecem em todos os aparelhos da equipe.', 'Entrar'],
+      cadastrar: ['Criar conta', 'Crie a conta com seu e-mail e uma senha. Depois você cria a equipe do seu negócio ou entra numa equipe que convidou você.', 'Criar conta'],
+      recuperar: ['Esqueci a senha', 'Digite o e-mail da conta. Vamos enviar um link para você criar uma nova senha.', 'Enviar link'],
+      'nova-senha': ['Criar nova senha', 'Digite a nova senha da sua conta.', 'Salvar nova senha'],
+    }[en.modo];
+    const links = {
+      entrar: [['cadastrar', 'Criar conta'], ['recuperar', 'Esqueci a senha']],
+      cadastrar: [['entrar', 'Já tenho conta']],
+      recuperar: [['entrar', 'Voltar para entrar']],
+      'nova-senha': [],
+    }[en.modo];
+    const senhaNova = en.modo === 'cadastrar' || en.modo === 'nova-senha';
+    return `<section class="painel nuvem-tela"><div class="cartao entrada">
+      <h1>${textos[0]}</h1>
+      <p class="sub">${textos[1]}</p>
+      ${temConvite && en.modo !== 'nova-senha' ? '<p class="info-bloco">Você abriu um convite para uma equipe. Entre ou crie a conta com o e-mail que recebeu o convite.</p>' : ''}
+      ${en.info ? `<p class="info-bloco" role="status">${esc(en.info)}</p>` : ''}
+      ${en.erro ? `<p class="erro-bloco" role="alert">${esc(en.erro)}</p>` : ''}
+      <form class="entrada-form" data-form="entrada" novalidate>
+        ${en.modo !== 'nova-senha' ? `<label class="campo"><span>E-mail</span>
+          <input id="entrada-email" type="email" inputmode="email" autocomplete="email" value="${esc(en.email)}" autocapitalize="none" spellcheck="false"></label>` : ''}
+        ${en.modo !== 'recuperar' ? `<label class="campo"><span>${en.modo === 'nova-senha' ? 'Nova senha' : 'Senha'}</span>
+          <input id="entrada-senha" type="password" autocomplete="${senhaNova ? 'new-password' : 'current-password'}">
+          ${senhaNova ? '<small>Pelo menos 8 caracteres.</small>' : ''}</label>` : ''}
+        <button type="submit" class="btn btn-primario" id="entrada-enviar">${textos[2]}</button>
+      </form>
+      ${links.length ? `<div class="entrada-links">${links.map(([modo, texto]) => `<button type="button" class="link" data-acao="modo-entrada" data-modo="${modo}">${texto}</button>`).join('')}</div>` : ''}
+    </div></section>`;
+  }
+
+  async function enviarEntrada() {
+    const nv = estado.nuvem;
+    const en = nv.entrada;
+    const campoEmail = $('#entrada-email');
+    const email = campoEmail ? campoEmail.value.trim() : en.email;
+    const senha = $('#entrada-senha') ? $('#entrada-senha').value : '';
+    en.email = email;
+    const falhar = (mensagem) => {
+      en.erro = mensagem;
+      en.info = '';
+      render();
+    };
+    if (en.modo !== 'nova-senha' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return falhar('Digite um e-mail válido.');
+    if (en.modo === 'entrar' && !senha) return falhar('Digite a senha.');
+    if ((en.modo === 'cadastrar' || en.modo === 'nova-senha') && senha.length < 8) return falhar('A senha precisa ter pelo menos 8 caracteres.');
+    const botao = $('#entrada-enviar');
+    botao.disabled = true;
+    botao.textContent = 'Aguarde…';
+    try {
+      if (en.modo === 'entrar') {
+        await aposEntrar(await N.entrar(email, senha));
+      } else if (en.modo === 'cadastrar') {
+        const r = await N.cadastrar(email, senha, enderecoDoApp(D.lerConvite()));
+        if (r.precisaConfirmar) mostrarEntrada('confirmar');
+        else await aposEntrar(r.sessao);
+      } else if (en.modo === 'recuperar') {
+        await N.recuperarSenha(email, enderecoDoApp());
+        mostrarEntrada('entrar', { info: `Se houver uma conta com ${email}, enviamos um link para criar uma nova senha.` });
+      } else if (en.modo === 'nova-senha') {
+        await N.definirSenha(senha);
+        history.replaceState(null, '', location.pathname);
+        en.modo = 'entrar';
+        avisar('Senha alterada');
+        await aposEntrar(await N.sessaoAtual());
+      }
+    } catch (e) {
+      falhar(e.message);
+    }
+  }
+
+  function telaConvite() {
+    const nv = estado.nuvem;
+    const c = nv.convite;
+    const outroEmail = c.email.toLowerCase() !== nv.usuario.email.toLowerCase();
+    return `<section class="painel nuvem-tela"><div class="cartao entrada">
+      <span class="rotulo">Convite</span>
+      <h1>Entrar na equipe ${esc(c.equipe)}</h1>
+      <p class="sub">Convite para ${esc(c.email)}. Na equipe, você vê e edita os ingredientes, preços e receitas do negócio.</p>
+      ${c.expirado ? '<p class="erro-bloco" role="alert">Este convite expirou. Peça um novo link ao dono da equipe.</p>' : ''}
+      ${outroEmail && !c.expirado ? `<p class="erro-bloco" role="alert">Você entrou como ${esc(nv.usuario.email)}, mas o convite é para ${esc(c.email)}. Saia e entre com o e-mail convidado.</p>` : ''}
+      ${c.erro ? `<p class="erro-bloco" role="alert">${esc(c.erro)}</p>` : ''}
+      <div class="acoes">
+        ${!c.expirado && !outroEmail ? '<button type="button" class="btn btn-primario" data-acao="aceitar-convite">Entrar na equipe</button>' : ''}
+        ${outroEmail ? '<button type="button" class="btn" data-acao="sair-conta">Sair da conta</button>' : ''}
+        <button type="button" class="btn" data-acao="recusar-convite">Agora não</button>
+      </div>
+    </div></section>`;
+  }
+
+  async function aceitarConvite() {
+    const nv = estado.nuvem;
+    try {
+      const equipeId = await N.aceitarConvite(nv.convite.id);
+      D.guardarConvite(null);
+      nv.convite = null;
+      avisar('Você entrou na equipe');
+      await carregarEquipes(equipeId);
+    } catch (e) {
+      nv.convite.erro = e.message;
+      render();
+    }
+  }
+
+  async function recusarConvite() {
+    D.guardarConvite(null);
+    estado.nuvem.convite = null;
+    await carregarEquipes(tela.equipe && tela.equipe.id);
+  }
+
+  function telaCriarEquipe() {
+    const nv = estado.nuvem;
+    const local = D.lerLocal();
+    const temLocal = Boolean(local && (local.ingredientes.some((i) => !i.exemplo) || local.receitas.some((r) => !r.exemplo)));
+    const opcao = (valor, titulo, texto, marcada) => `<label class="opcao"><input type="radio" name="equipe-inicio" id="equipe-inicio-${valor}" value="${valor}"${marcada ? ' checked' : ''}>
+      <span><strong>${titulo}</strong><small>${texto}</small></span></label>`;
+    return `<section class="painel nuvem-tela"><div class="cartao entrada">
+      ${nv.voltarPara ? '<button type="button" class="voltar" data-acao="voltar-equipe">← Voltar</button>' : ''}
+      <h1>${nv.equipes.length ? 'Criar outra equipe' : 'Crie a equipe do seu negócio'}</h1>
+      <p class="sub">A equipe reúne os ingredientes, preços e receitas de um negócio. Depois você convida as pessoas que trabalham com você.</p>
+      ${nv.mensagem ? `<p class="erro-bloco" role="alert">${esc(nv.mensagem)}</p>` : ''}
+      <form class="entrada-form" data-form="criar-equipe" novalidate>
+        <label class="campo"><span>Nome do negócio</span>
+          <input id="equipe-nome" maxlength="120" placeholder="Ex.: Padaria da Ana" autocomplete="organization"></label>
+        <fieldset class="campo"><legend>Começar com</legend>
+          <div class="opcoes-radio">
+            ${temLocal ? opcao('local', 'Os dados deste aparelho', `${local.ingredientes.length} ${plural(local.ingredientes.length, 'ingrediente', 'ingredientes')} e ${local.receitas.length} ${plural(local.receitas.length, 'receita', 'receitas')} já cadastrados aqui`, true) : ''}
+            ${opcao('exemplo', 'O exemplo do croissant', 'Alguns ingredientes e uma receita para ver como funciona. Dá para apagar depois.', !temLocal)}
+            ${opcao('vazio', 'Nada', 'A equipe começa sem nenhum dado.', false)}
+          </div>
+        </fieldset>
+        <button type="submit" class="btn btn-primario" id="equipe-criar">Criar equipe</button>
+      </form>
+      <p class="dica">Alguém do seu negócio já usa o app? Peça ao dono da equipe um link de convite.</p>
+      <div class="entrada-links"><span class="dica">Conta: ${esc(nv.usuario.email)}</span>
+        <button type="button" class="link" data-acao="sair-conta">Sair</button></div>
+    </div></section>`;
+  }
+
+  async function criarEquipe() {
+    const nv = estado.nuvem;
+    const nome = $('#equipe-nome').value.trim();
+    const marcada = $('input[name="equipe-inicio"]:checked');
+    const inicio = marcada ? marcada.value : 'vazio';
+    if (!nome) {
+      nv.mensagem = 'Dê um nome à equipe.';
+      render();
+      $('#equipe-nome').focus();
+      return;
+    }
+    const botao = $('#equipe-criar');
+    botao.disabled = true;
+    botao.textContent = 'Criando…';
+    try {
+      const id = await N.criarEquipe(nome);
+      const eq = { id, nome, papel: 'dono' };
+      nv.equipes.push(eq);
+      nv.mensagem = '';
+      nv.voltarPara = null;
+      let inicial = D.vazio();
+      if (inicio === 'local') inicial = D.lerLocal() || D.vazio();
+      else if (inicio === 'exemplo') inicial = D.validar(D.exemplo(MES_ATUAL));
+      abrirDoCache(eq, { dados: inicial, foto: D.fotografar(D.vazio()) });
+      nv.ultimaCarga = Date.now();
+      salvarDados(); // envia tudo para a equipe nova
+      avisar('Equipe criada');
+    } catch (e) {
+      nv.mensagem = e.message;
+      render();
+    }
+  }
+
+  /* ---------- Equipe: membros, convites e troca de equipe ---------- */
+
+  async function carregarPainelEquipe() {
+    const nv = estado.nuvem;
+    const eq = nv.equipe;
+    nv.painel = { carregando: true, membros: [], convites: [], erro: '', linkNovo: null };
+    atualizarSecaoEquipe();
+    try {
+      const [membros, convites] = await Promise.all([
+        N.membros(eq.id),
+        eq.papel === 'dono' ? N.convites(eq.id) : Promise.resolve([]),
+      ]);
+      if (nv.equipe !== eq) return;
+      nv.painel = { ...nv.painel, carregando: false, membros, convites };
+    } catch (e) {
+      nv.painel = { ...nv.painel, carregando: false, erro: e.message };
+    }
+    atualizarSecaoEquipe();
+  }
+
+  function atualizarSecaoEquipe() {
+    const secao = $('#secao-equipe');
+    if (secao) manterFoco(() => { secao.innerHTML = secaoEquipeHtml(); });
+  }
+
+  function secaoEquipeHtml() {
+    const nv = estado.nuvem;
+    const eq = nv.equipe;
+    const dono = eq.papel === 'dono';
+    const p = nv.painel || { carregando: true, membros: [], convites: [] };
+    const membros = p.membros.map((m) => `<li>
+        <span class="membro-email">${esc(m.email)}${m.usuario_id === nv.usuario.id ? ' <span class="dica">(você)</span>' : ''}</span>
+        <span class="chip">${m.papel === 'dono' ? 'Dono' : 'Membro'}</span>
+        ${dono && m.usuario_id !== nv.usuario.id ? `<button type="button" class="icone" data-acao="remover-membro" data-id="${esc(m.usuario_id)}" data-email="${esc(m.email)}" aria-label="Remover ${esc(m.email)} da equipe">×</button>` : ''}
+      </li>`).join('');
+    const convites = p.convites.map((c) => `<li>
+        <span class="membro-email">${esc(c.email)} <span class="dica">· convite pendente</span></span>
+        <button type="button" class="btn btn-p" data-acao="compartilhar-convite" data-id="${esc(c.id)}">Enviar link</button>
+        <button type="button" class="icone" data-acao="cancelar-convite" data-id="${esc(c.id)}" aria-label="Cancelar o convite de ${esc(c.email)}">×</button>
+      </li>`).join('');
+    return `<h3>Equipe</h3>
+      ${dono ? `<div class="linha-form">
+          <input id="equipe-renomear" value="${esc(eq.nome)}" maxlength="120" aria-label="Nome da equipe">
+          <button type="button" class="btn btn-p" data-acao="renomear-equipe">Renomear</button>
+        </div>` : `<p><strong>${esc(eq.nome)}</strong> <span class="dica">· você é membro</span></p>`}
+      ${p.carregando ? '<p class="dica">Carregando a equipe…</p>' : ''}
+      ${p.erro ? `<p class="erro-msg">${esc(p.erro)}</p>` : ''}
+      ${membros || convites ? `<ul class="lista-membros">${membros}${convites}</ul>` : ''}
+      ${p.linkNovo ? `<div class="link-convite" role="status">
+          <p>Convite criado. Envie este link para <strong>${esc(p.linkNovo.email)}</strong>; ele vale 14 dias:</p>
+          <input id="convite-link" readonly value="${esc(p.linkNovo.url)}" aria-label="Link do convite">
+          <button type="button" class="btn btn-primario btn-p" data-acao="compartilhar-convite" data-id="${esc(p.linkNovo.id)}">${navigator.share ? 'Compartilhar link' : 'Copiar link'}</button>
+        </div>` : ''}
+      ${dono ? `<form class="convidar" data-form="convidar" novalidate>
+          <label class="campo"><span>Convidar por e-mail</span>
+            <input id="convite-email" type="email" inputmode="email" autocomplete="off" autocapitalize="none" placeholder="pessoa@email.com"></label>
+          <label class="campo"><span>Papel</span>
+            <select id="convite-papel">
+              <option value="membro">Membro: vê e edita ingredientes e receitas</option>
+              <option value="dono">Dono: também convida e remove pessoas</option>
+            </select></label>
+          <button type="submit" class="btn">Criar convite</button>
+          <p class="erro-msg" id="convite-erro" hidden></p>
+        </form>` : '<button type="button" class="btn btn-perigo btn-p" data-acao="sair-equipe">Sair desta equipe</button>'}
+      ${nv.equipes.length > 1 ? `<h4>Suas equipes</h4><ul class="lista-membros">${nv.equipes.map((e) => `<li>
+          <span class="membro-email">${esc(e.nome)}</span>
+          ${e.id === eq.id ? '<span class="chip chip-ok">Aberta</span>' : `<button type="button" class="btn btn-p" data-acao="trocar-equipe" data-id="${esc(e.id)}">Abrir</button>`}
+        </li>`).join('')}</ul>` : ''}
+      <button type="button" class="link" data-acao="nova-equipe">Criar outra equipe</button>`;
+  }
+
+  async function convidar() {
+    const nv = estado.nuvem;
+    const eq = nv.equipe;
+    const email = $('#convite-email').value.trim().toLowerCase();
+    const papel = $('#convite-papel').value;
+    const erro = $('#convite-erro');
+    const falhar = (mensagem) => {
+      erro.textContent = mensagem;
+      erro.hidden = false;
+      $('#convite-email').focus();
+    };
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return falhar('Digite um e-mail válido.');
+    const p = nv.painel;
+    if (p.membros.some((m) => m.email.toLowerCase() === email)) return falhar('Esta pessoa já está na equipe.');
+    const existente = p.convites.find((c) => c.email.toLowerCase() === email);
+    if (existente) {
+      p.linkNovo = { id: existente.id, email, url: enderecoDoApp(existente.id) };
+      atualizarSecaoEquipe();
+      return;
+    }
+    try {
+      const c = await N.convidar(eq.id, email, papel);
+      p.convites.push(c);
+      p.linkNovo = { id: c.id, email: c.email, url: enderecoDoApp(c.id) };
+      atualizarSecaoEquipe();
+    } catch (e) {
+      falhar(e.message);
+    }
+  }
+
+  async function compartilharConvite(id) {
+    const nv = estado.nuvem;
+    const url = enderecoDoApp(id);
+    const texto = `Você foi convidado para a equipe ${nv.equipe.nome} no Receitas com Custo. Abra o link e entre com este e-mail:`;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: 'Convite: Receitas com Custo', text: texto, url });
+        return;
+      } catch (e) {
+        if (e && e.name === 'AbortError') return;
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      avisar('Link do convite copiado');
+    } catch (e) {
+      const campo = $('#convite-link');
+      if (campo) campo.select();
+      avisar('Selecione e copie o link do convite');
+    }
+  }
+
+  async function cancelarConvite(id) {
+    const nv = estado.nuvem;
+    try {
+      await N.cancelarConvite(id);
+      nv.painel.convites = nv.painel.convites.filter((c) => c.id !== id);
+      if (nv.painel.linkNovo && nv.painel.linkNovo.id === id) nv.painel.linkNovo = null;
+      atualizarSecaoEquipe();
+      avisar('Convite cancelado');
+    } catch (e) {
+      avisar(e.message);
+    }
+  }
+
+  async function removerMembro(usuarioId, email) {
+    const nv = estado.nuvem;
+    const ok = await confirmar({
+      titulo: 'Remover da equipe?',
+      texto: `${email} deixa de ver e editar os dados de ${nv.equipe.nome}.`,
+      botao: 'Remover',
+      perigo: true,
+    });
+    if (!ok) return;
+    try {
+      await N.removerMembro(nv.equipe.id, usuarioId);
+      nv.painel.membros = nv.painel.membros.filter((m) => m.usuario_id !== usuarioId);
+      atualizarSecaoEquipe();
+      avisar('Pessoa removida da equipe');
+    } catch (e) {
+      avisar(e.message);
+    }
+  }
+
+  async function renomearEquipe() {
+    const nv = estado.nuvem;
+    const nome = $('#equipe-renomear').value.trim();
+    if (!nome || nome === nv.equipe.nome) return;
+    try {
+      await N.renomearEquipe(nv.equipe.id, nome);
+      nv.equipe.nome = nome;
+      salvarTela();
+      atualizarCabecaNuvem();
+      avisar('Equipe renomeada');
+    } catch (e) {
+      avisar(e.message);
+    }
+  }
+
+  async function sairDaEquipe() {
+    const nv = estado.nuvem;
+    const ok = await confirmar({
+      titulo: 'Sair desta equipe?',
+      texto: `Você deixa de ver os dados de ${nv.equipe.nome}. Para voltar, precisa de um novo convite.`,
+      botao: 'Sair da equipe',
+      perigo: true,
+    });
+    if (!ok) return;
+    try {
+      await N.removerMembro(nv.equipe.id, nv.usuario.id);
+      fecharDialogo('#dlg-dados');
+      nv.equipe = null;
+      tela.equipe = null;
+      salvarTela();
+      await carregarEquipes();
+    } catch (e) {
+      avisar(e.message);
+    }
+  }
+
+  async function trocarEquipe(id) {
+    const nv = estado.nuvem;
+    const eq = nv.equipes.find((e) => e.id === id);
+    if (!eq) return;
+    if (D.diferencas(nv.foto, dados).total) await sincronizar(false);
+    fecharDialogo('#dlg-dados');
+    await abrirEquipe(eq);
+  }
+
+  function novaEquipe() {
+    const nv = estado.nuvem;
+    fecharDialogo('#dlg-dados');
+    nv.voltarPara = nv.equipe;
+    nv.mensagem = '';
+    nv.fase = 'equipe';
+    render();
+  }
+
+  /* ---------- Instalar no aparelho (app pelo navegador) ---------- */
+
+  let pedidoInstalacao = null;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    pedidoInstalacao = e;
+  });
+  window.addEventListener('appinstalled', () => {
+    pedidoInstalacao = null;
+    avisar('App instalado');
+  });
+
+  function instalado() {
+    return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  }
+
+  function secaoInstalarHtml() {
+    if (instalado()) return '';
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    let como = '<p class="dica">No menu do navegador, escolha “Instalar app” ou “Adicionar à tela inicial”.</p>';
+    if (pedidoInstalacao) como = '<button type="button" class="btn btn-primario" data-acao="instalar">Instalar neste aparelho</button>';
+    else if (ios) como = '<p class="dica">No Safari, toque em Compartilhar (o quadrado com a seta para cima) e depois em “Adicionar à Tela de Início”.</p>';
+    return `<section class="secao so-local">
+      <h3>Instalar o app</h3>
+      <p class="sub">Coloca o Receitas com Custo na tela inicial, com ícone próprio, abrindo em tela cheia e funcionando sem internet.</p>
+      ${como}
+    </section>`;
+  }
+
+  async function instalar() {
+    if (!pedidoInstalacao) return;
+    const pedido = pedidoInstalacao;
+    pedidoInstalacao = null;
+    pedido.prompt();
+    const escolha = await pedido.userChoice;
+    fecharDialogo('#dlg-dados');
+    if (escolha.outcome === 'accepted') avisar('Instalando o app…');
+  }
+
+  function registrarServiceWorker() {
+    const proprio = window.self === window.top && /^https?:$/.test(location.protocol);
+    if (!proprio || !('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register('sw.js').catch(() => {
+      /* sem modo offline neste navegador */
+    });
+    // App instalado: pede que o navegador não apague os dados guardados neste aparelho.
+    if (instalado() && navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  }
+
+  /* =====================================================================
    * Dados e backup
    * ===================================================================== */
 
   function abrirDados() {
     const ni = dados.ingredientes.length;
     const nr = dados.receitas.length;
+    const naNuvem = MODO_NUVEM && estado.nuvem.equipe;
+    // Na nuvem, substituir ou apagar tudo afeta a equipe inteira: só o dono pode.
+    const dono = !naNuvem || estado.nuvem.equipe.papel === 'dono';
+    const contagem = `${ni} ${plural(ni, 'ingrediente', 'ingredientes')} e ${nr} ${plural(nr, 'receita', 'receitas')}`;
     $('#dlg-dados').innerHTML = `<div class="dlg-form">
       <header class="dlg-cabeca">
-        <h2 id="dlg-dados-titulo">Dados e backup</h2>
+        <h2 id="dlg-dados-titulo">${naNuvem ? 'Equipe e dados' : 'Dados e backup'}</h2>
         <button type="button" class="icone" data-acao="fechar-dialogo" aria-label="Fechar">×</button>
       </header>
       <div class="dlg-corpo">
-        <p class="sub">Os dados ficam salvos só neste navegador, neste aparelho: ${ni} ${plural(ni, 'ingrediente', 'ingredientes')} e ${nr} ${plural(nr, 'receita', 'receitas')}. Baixe um backup de vez em quando; ele também serve para levar os dados para outro aparelho.</p>
-        <div class="opcoes-dados">
-          <button type="button" class="btn so-local" data-acao="exportar">Baixar backup (.json)</button>
-          <button type="button" class="btn" data-acao="importar">Importar backup…</button>
-          <input type="file" id="arquivo-backup" accept=".json,application/json" data-campo="importar" hidden>
-          <button type="button" class="btn so-local" data-acao="abrir-chave">Leitura por foto: ${estado.chave ? 'chave cadastrada' : 'cadastrar chave da API'}</button>
-          ${temExemplos()
-            ? '<button type="button" class="btn" data-acao="apagar-exemplos">Apagar dados de exemplo</button>'
-            : '<button type="button" class="btn" data-acao="carregar-exemplo">Carregar o exemplo do croissant</button>'}
-          <button type="button" class="btn btn-perigo" data-acao="apagar-tudo">Apagar todos os dados</button>
-        </div>
+        ${naNuvem ? `<section class="secao" id="secao-equipe">${secaoEquipeHtml()}</section>
+          <section class="secao">
+            <h3>Conta</h3>
+            <p>${esc(estado.nuvem.usuario.email)}</p>
+            <div><button type="button" class="btn btn-p" data-acao="sair-conta">Sair da conta neste aparelho</button></div>
+          </section>` : ''}
+        ${secaoInstalarHtml()}
+        <section class="secao">
+          <h3>${naNuvem ? 'Dados da equipe' : 'Dados e backup'}</h3>
+          <p class="sub">${naNuvem
+            ? `A equipe tem ${contagem}, salvos na nuvem. O backup baixa uma cópia em arquivo.`
+            : `Os dados ficam salvos só neste navegador, neste aparelho: ${contagem}. Baixe um backup de vez em quando; ele também serve para levar os dados para outro aparelho.`}</p>
+          <div class="opcoes-dados">
+            <button type="button" class="btn so-local" data-acao="exportar">Baixar backup (.json)</button>
+            ${dono ? '<button type="button" class="btn" data-acao="importar">Importar backup…</button>' : ''}
+            <input type="file" id="arquivo-backup" accept=".json,application/json" data-campo="importar" hidden>
+            <button type="button" class="btn so-local" data-acao="abrir-chave">Leitura por foto: ${estado.chave ? 'chave cadastrada' : 'cadastrar chave da API'}</button>
+            ${temExemplos()
+              ? '<button type="button" class="btn" data-acao="apagar-exemplos">Apagar dados de exemplo</button>'
+              : '<button type="button" class="btn" data-acao="carregar-exemplo">Carregar o exemplo do croissant</button>'}
+            ${dono ? `<button type="button" class="btn btn-perigo" data-acao="apagar-tudo">${naNuvem ? 'Apagar todos os dados da equipe' : 'Apagar todos os dados'}</button>` : ''}
+          </div>
+        </section>
       </div>
     </div>`;
     abrirDialogo('#dlg-dados');
+    if (naNuvem) carregarPainelEquipe();
   }
 
   function exportar() {
@@ -1939,7 +2743,7 @@
       }
       const ok = await confirmar({
         titulo: 'Substituir os dados atuais?',
-        texto: `O backup tem ${novos.ingredientes.length} ingredientes e ${novos.receitas.length} receitas. Os dados atuais deste navegador (${dados.ingredientes.length} ingredientes e ${dados.receitas.length} receitas) serão substituídos.`,
+        texto: `O backup tem ${novos.ingredientes.length} ingredientes e ${novos.receitas.length} receitas. Os dados atuais ${MODO_NUVEM ? 'da equipe' : 'deste navegador'} (${dados.ingredientes.length} ingredientes e ${dados.receitas.length} receitas) serão substituídos${MODO_NUVEM ? ' para todos os membros' : ''}.`,
         botao: 'Substituir',
         perigo: true,
       });
@@ -1998,7 +2802,9 @@
   async function apagarTudo() {
     const ok = await confirmar({
       titulo: 'Apagar todos os dados?',
-      texto: 'Todos os ingredientes, preços e receitas deste navegador serão apagados. Se quiser guardar, baixe um backup antes.',
+      texto: MODO_NUVEM
+        ? 'Todos os ingredientes, preços e receitas da equipe serão apagados para todos os membros. Se quiser guardar, baixe um backup antes.'
+        : 'Todos os ingredientes, preços e receitas deste navegador serão apagados. Se quiser guardar, baixe um backup antes.',
       botao: 'Apagar tudo',
       perigo: true,
     });
@@ -2096,6 +2902,23 @@
       case 'continuar-importacao': continuarImportacao(); break;
       case 'abrir-chave': fecharDialogo('#dlg-dados'); abrirChave(); break;
       case 'remover-chave': removerChave(); break;
+
+      // Nuvem: conta e equipe
+      case 'tentar-nuvem': iniciarNuvem(); break;
+      case 'modo-entrada': mostrarEntrada(el.dataset.modo); break;
+      case 'aceitar-convite': aceitarConvite(); break;
+      case 'recusar-convite': recusarConvite(); break;
+      case 'sair-conta': sairDaConta(); break;
+      case 'sincronizar': sincronizar(true); break;
+      case 'nova-equipe': novaEquipe(); break;
+      case 'voltar-equipe': estado.nuvem.voltarPara = null; estado.nuvem.fase = 'pronto'; render(); break;
+      case 'trocar-equipe': trocarEquipe(id); break;
+      case 'renomear-equipe': renomearEquipe(); break;
+      case 'remover-membro': removerMembro(id, el.dataset.email); break;
+      case 'cancelar-convite': cancelarConvite(id); break;
+      case 'compartilhar-convite': compartilharConvite(id); break;
+      case 'sair-equipe': sairDaEquipe(); break;
+      case 'instalar': instalar(); break;
 
       // Produção
       case 'produzir': produzir(id); break;
@@ -2302,7 +3125,21 @@
     if (formulario === 'ingrediente') salvarIngrediente();
     else if (formulario === 'ajuste') aplicarAjuste();
     else if (formulario === 'chave') salvarChave();
+    else if (formulario === 'entrada') enviarEntrada();
+    else if (formulario === 'criar-equipe') criarEquipe();
+    else if (formulario === 'convidar') convidar();
   });
+
+  // Nuvem: traz o que a equipe mudou ao voltar para o app ou quando a internet volta.
+  if (MODO_NUVEM) {
+    document.addEventListener('visibilitychange', () => {
+      const nv = estado.nuvem;
+      if (document.visibilityState === 'visible' && nv.fase === 'pronto' && Date.now() - nv.ultimaCarga > 30000) sincronizar(true);
+    });
+    window.addEventListener('online', () => {
+      if (estado.nuvem.fase === 'pronto') sincronizar(true);
+    });
+  }
 
   window.addEventListener('hashchange', () => {
     const aba = location.hash.slice(1);
@@ -2314,9 +3151,14 @@
 
   /* ---------- Início ---------- */
 
-  if (primeiraVisita && !estado.producaoId && dados.receitas.length) estado.producaoId = dados.receitas[0].id;
   $('#marca-mes').textContent = 'Mês de referência: ' + C.nomeMes(MES_ATUAL);
-  atualizarFaixas();
-  render();
-  salvarTela();
+  registrarServiceWorker();
+  if (MODO_NUVEM) {
+    $('[data-acao="abrir-dados"]').textContent = 'Equipe e dados';
+    iniciarNuvem();
+  } else {
+    if (primeiraVisita && !estado.producaoId && dados.receitas.length) estado.producaoId = dados.receitas[0].id;
+    render();
+    salvarTela();
+  }
 })();

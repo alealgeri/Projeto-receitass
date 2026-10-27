@@ -642,6 +642,78 @@ input.falta { border-color: var(--alerta); border-style: dashed; }
 .medida { display: grid; gap: 4px; font-size: 0.85rem; min-width: 0; }
 .passos { display: grid; gap: 4px; margin: 0; padding-left: 1.25rem; }
 
+/* ---------- Nuvem: conta e equipe ---------- */
+
+.marca-equipe { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; font-size: 0.8rem; flex-basis: 100%; }
+.equipe-nome { font-weight: 600; }
+.status-nuvem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--tinta-suave);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.status-nuvem i { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.status-pendente i, .status-enviando i { background: var(--manteiga); }
+.status-offline i { background: var(--alerta); }
+.status-erro { color: var(--erro); }
+.status-erro i { background: var(--erro); }
+
+.nuvem-tela { justify-items: center; padding-top: 8px; }
+.nuvem-tela > .cartao { width: 100%; max-width: 30rem; }
+.entrada { display: grid; gap: 14px; padding: 24px 22px; }
+.entrada h1 { font-size: clamp(1.5rem, 1.2rem + 1vw, 1.9rem); }
+.entrada-form { display: grid; gap: 14px; }
+.entrada-form .btn-primario { justify-self: stretch; min-height: 44px; }
+.entrada-links { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px; }
+.link {
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--tinta);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.info-bloco { padding: 12px 16px; border-radius: var(--raio-p); background: var(--superficie-2); border: 1px solid var(--linha); }
+
+.opcoes-radio { display: grid; gap: 8px; }
+.opcao {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--linha-forte);
+  border-radius: var(--raio-p);
+  cursor: pointer;
+}
+.opcao:has(input:checked) { border-color: var(--manteiga-borda); background: var(--manteiga-suave); }
+.opcao input { margin-top: 3px; accent-color: var(--manteiga-borda); }
+.opcao span { display: grid; gap: 2px; }
+.opcao small { color: var(--tinta-suave); font-size: 0.82rem; }
+
+.secao { display: grid; gap: 10px; padding-top: 14px; border-top: 1px dashed var(--linha); }
+.secao:first-child { padding-top: 0; border-top: 0; }
+.secao h3 { font-size: 1.05rem; }
+.secao h4 { font-size: 0.85rem; margin: 4px 0 0; }
+.lista-membros { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.lista-membros li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--linha); }
+.lista-membros li:first-child { border-top: 0; }
+.membro-email { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 0.9rem; }
+.linha-form { display: flex; gap: 8px; }
+.linha-form input { flex: 1; min-width: 0; min-height: 36px; padding: 6px 10px; border: 1px solid var(--linha-forte); border-radius: var(--raio-p); background: var(--superficie); color: var(--tinta); }
+.convidar { display: grid; gap: 10px; }
+.convidar .btn { justify-self: start; }
+.link-convite { display: grid; gap: 8px; padding: 12px; border-radius: var(--raio-p); background: var(--manteiga-suave); }
+.link-convite input { width: 100%; min-height: 36px; padding: 6px 10px; border: 1px solid var(--linha-forte); border-radius: var(--raio-p); background: var(--superficie); color: var(--tinta); font-size: 0.85rem; }
+.link-convite .btn { justify-self: start; }
+
 /* ---------- Vazio ---------- */
 
 .vazio { display: grid; justify-items: start; gap: 10px; padding: 28px 22px; }
