@@ -9,7 +9,9 @@
   const C = raiz.Calculos;
   const CHAVE_DADOS = 'receitas-com-custo:v1';
   const CHAVE_TELA = 'receitas-com-custo:tela';
+  const CHAVE_API = 'receitas-com-custo:chave-api';
   const VERSAO = 1;
+  const MEDIDAS = ['xicara', 'colher_sopa', 'colher_cha'];
 
   let armazenamentoOk = true;
 
@@ -47,20 +49,21 @@
     const anterior = C.deslocarMes(mesAtual, -1);
     const emb = (preco, qtd, unidade) => ({ tipo: 'embalagem', preco, qtd, unidade });
     const direto = (preco) => ({ tipo: 'direto', preco });
-    const ing = (id, nome, tipo, antes, agora) => ({
+    const ing = (id, nome, tipo, antes, agora, medidas = {}) => ({
       id: 'ex_' + id,
       nome,
       tipo,
       precos: [{ mes: anterior, entrada: antes }].concat(agora ? [{ mes: mesAtual, entrada: agora }] : []),
+      medidas,
       exemplo: true,
     });
 
     const ingredientes = [
-      ing('farinha', 'Farinha de trigo T55', 'massa', emb(110, 25, 'kg'), emb(115, 25, 'kg')),
-      ing('manteiga', 'Manteiga sem sal', 'massa', direto(49.9), direto(52)),
-      ing('leite', 'Leite integral', 'volume', direto(5.29), direto(5.49)),
-      ing('agua', 'Água filtrada', 'volume', emb(6, 20, 'L'), emb(6, 20, 'L')),
-      ing('acucar', 'Açúcar refinado', 'massa', emb(23.9, 5, 'kg'), emb(24.9, 5, 'kg')),
+      ing('farinha', 'Farinha de trigo T55', 'massa', emb(110, 25, 'kg'), emb(115, 25, 'kg'), { xicara: 120, colher_sopa: 8 }),
+      ing('manteiga', 'Manteiga sem sal', 'massa', direto(49.9), direto(52), { colher_sopa: 14 }),
+      ing('leite', 'Leite integral', 'volume', direto(5.29), direto(5.49), { xicara: 240 }),
+      ing('agua', 'Água filtrada', 'volume', emb(6, 20, 'L'), emb(6, 20, 'L'), { xicara: 240 }),
+      ing('acucar', 'Açúcar refinado', 'massa', emb(23.9, 5, 'kg'), emb(24.9, 5, 'kg'), { xicara: 180, colher_sopa: 12 }),
       // Sem preço deste mês, para mostrar o aviso de pendente.
       ing('sal', 'Sal refinado', 'massa', emb(3.49, 1, 'kg'), null),
       ing('fermento', 'Fermento biológico seco', 'massa', emb(32.9, 500, 'g'), emb(34.5, 500, 'g')),
@@ -133,7 +136,18 @@
       })
       .filter(Boolean)
       .sort((a, b) => a.mes.localeCompare(b.mes));
-    return { id: i.id, nome: texto(i.nome, 200).trim(), tipo, precos, exemplo: i.exemplo === true };
+    return { id: i.id, nome: texto(i.nome, 200).trim(), tipo, precos, medidas: validarMedidas(i.medidas, tipo), exemplo: i.exemplo === true };
+  }
+
+  /** Medidas caseiras do ingrediente, em g (peso) ou ml (volume): { xicara: 120, colher_sopa: 8 }. */
+  function validarMedidas(m, tipo) {
+    const medidas = {};
+    if (!m || typeof m !== 'object' || tipo === 'unidade') return medidas;
+    for (const chave of MEDIDAS) {
+      const v = numOuNull(m[chave]);
+      if (v > 0) medidas[chave] = v;
+    }
+    return medidas;
   }
 
   function validarReceita(r, ingredientesPorId) {
@@ -209,12 +223,32 @@
     gravar(CHAVE_TELA, tela);
   }
 
+  // A chave da API fica separada dos dados: não entra no backup nem é apagada com eles.
+  function carregarChaveApi() {
+    const c = ler(CHAVE_API);
+    return typeof c === 'string' ? c : '';
+  }
+
+  function salvarChaveApi(chave) {
+    if (chave) {
+      gravar(CHAVE_API, chave);
+    } else {
+      try {
+        raiz.localStorage.removeItem(CHAVE_API);
+      } catch (erro) {
+        armazenamentoOk = false;
+      }
+    }
+  }
+
   raiz.Dados = {
     VERSAO,
     carregar,
     salvar,
     carregarTela,
     salvarTela,
+    carregarChaveApi,
+    salvarChaveApi,
     exemplo,
     vazio,
     validar,

@@ -8,6 +8,7 @@
 
   const C = window.Calculos;
   const D = window.Dados;
+  const L = window.Leitura;
   const ABAS = ['ingredientes', 'receitas', 'producao'];
   const MES_ATUAL = C.mesDe(new Date());
   const ATALHOS = [0.5, 1, 1.5, 2, 3];
@@ -23,6 +24,8 @@
     busca: '',
     mensal: null, // { mes, valores: { idIngrediente: texto }, erros: {} }
     receita: null, // rascunho da receita em edição
+    importacao: null, // leitura de receita por foto: { etapa, fotos, erro, revisao, ... }
+    chave: D.carregarChaveApi(), // chave da API da Anthropic, só neste navegador
     ingrediente: null, // rascunho do diálogo de ingrediente
     ajuste: null, // rascunho do diálogo de ajuste
     producaoId: typeof tela.producaoId === 'string' ? tela.producaoId : null,
@@ -473,6 +476,9 @@
       mes: MES_ATUAL,
       precoAlterado: false,
       precos: ing ? C.historico(ing) : [],
+      medidas: Object.fromEntries(Object.keys(L.MEDIDAS).map((k) => [
+        k, ing && ing.medidas && ing.medidas[k] ? C.formatarCampo(ing.medidas[k]) : '',
+      ])),
       retorno,
     };
     renderDialogoIngrediente();
@@ -522,6 +528,11 @@
         <label class="campo"><span>Mês de referência do preço</span>
           <select id="ing-mes" data-ing="mes">${meses.map((m) => `<option value="${m}"${m === r.mes ? ' selected' : ''}>${esc(C.nomeMes(m))}</option>`).join('')}</select>
           <small>${r.id ? 'Um preço novo só é registrado se você mudar o valor, a embalagem ou o mês.' : 'Sem o preço ainda? Deixe em branco e preencha depois.'}</small></label>
+        ${r.tipo !== 'unidade' ? `<fieldset class="campo"><legend>Medidas caseiras (opcional)</legend>
+          <small>Usadas para converter receitas lidas por foto. Ex.: 1 xícara de farinha = 120 g.</small>
+          <div class="medidas">${Object.entries(L.MEDIDAS).map(([k, nome]) => `<label class="medida"><span>1 ${nome}</span>
+            <div class="grupo"><input id="ing-medida-${k}" data-ing-medida="${k}" inputmode="decimal" autocomplete="off" value="${esc(r.medidas[k])}" placeholder="—"><span class="grupo-txt">${def.menor}</span></div></label>`).join('')}</div>
+        </fieldset>` : ''}
         ${r.precos.length ? historicoHtml() : ''}
         <p class="erro-msg" id="ing-erro" hidden></p>
       </div>
@@ -609,7 +620,18 @@
       precos = C.registrarPreco(precos, r.mes, entrada);
     }
 
-    const salvo = { id: r.id || D.novoId('ing'), nome, tipo: r.tipo, precos, exemplo: false };
+    const medidas = {};
+    if (r.tipo !== 'unidade') {
+      for (const k of Object.keys(L.MEDIDAS)) {
+        const t = String(r.medidas[k] || '').trim();
+        if (!t) continue;
+        const v = num(t);
+        if (!(v > 0)) return erroIngrediente(`Confira a medida de 1 ${L.MEDIDAS[k]}: use um número maior que zero.`, '#ing-medida-' + k);
+        medidas[k] = v;
+      }
+    }
+
+    const salvo = { id: r.id || D.novoId('ing'), nome, tipo: r.tipo, precos, medidas, exemplo: false };
     if (r.id) dados.ingredientes = dados.ingredientes.map((i) => (i.id === r.id ? salvo : i));
     else dados.ingredientes.push(salvo);
     salvarDados();
@@ -661,11 +683,15 @@
 
   function telaReceitas() {
     if (estado.receita) return telaEditor();
+    if (estado.importacao) return telaImportacao();
     const lista = porNome(dados.receitas);
     const cabeca = `<div class="painel-cabeca">
       <div><h1>Receitas</h1>
         <p class="sub">Cada receita soma os ingredientes pelo preço mais recente do painel 1. Para produzir, escolha a receita no painel 3.</p></div>
-      <div class="acoes"><button type="button" class="btn btn-primario" data-acao="nova-receita">+ Nova receita</button></div>
+      <div class="acoes">
+        <button type="button" class="btn so-local" data-acao="abrir-importacao">Ler receita de foto</button>
+        <button type="button" class="btn btn-primario" data-acao="nova-receita">+ Nova receita</button>
+      </div>
     </div>`;
     if (!lista.length) {
       return `<section class="painel">${cabeca}
@@ -1002,6 +1028,441 @@
     salvarTela();
     render();
     avisar('Receita excluída');
+  }
+
+  /* =====================================================================
+   * Painel 2 — Leitura de receita por foto
+   * ===================================================================== */
+
+  function abrirImportacao() {
+    estado.importacao = { etapa: 'fotos', fotos: [], erro: '', preparando: false, controle: null, revisao: null };
+    mudarAba('receitas');
+  }
+
+  async function cancelarImportacao() {
+    const imp = estado.importacao;
+    if (!imp) return;
+    if (imp.etapa === 'revisao') {
+      const ok = await confirmar({
+        titulo: 'Descartar a receita lida?',
+        texto: 'O que foi lido nas fotos será perdido. Para ler de novo, a leitura é cobrada outra vez.',
+        botao: 'Descartar',
+        perigo: true,
+      });
+      if (!ok) return;
+    }
+    if (imp.controle) imp.controle.abort();
+    estado.importacao = null;
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  function telaImportacao() {
+    const imp = estado.importacao;
+    if (imp.etapa === 'revisao') return telaRevisao();
+    const lendo = imp.etapa === 'lendo';
+    const fotos = imp.fotos.map((f, i) => `<figure class="foto">
+        <img src="${f.miniatura}" alt="Foto ${i + 1} da receita">
+        <figcaption>${imp.fotos.length > 1 ? `Página ${i + 1}` : 'Foto'}</figcaption>
+        ${lendo ? '' : `<button type="button" class="icone foto-remover" data-acao="remover-foto" data-chave="${f.chave}" aria-label="Remover a foto ${i + 1}">×</button>`}
+      </figure>`).join('');
+    const podeLer = imp.fotos.length && estado.chave && !imp.preparando;
+    return `<section class="painel">
+      <div class="painel-cabeca"><div>
+        <button type="button" class="voltar" data-acao="cancelar-importacao">← Receitas</button>
+        <h1>Ler receita de foto</h1>
+        <p class="sub">Fotografe a receita inteira, de frente e com boa luz. Se ela ocupa mais de uma página, adicione as fotos em ordem (até ${L.MAX_FOTOS}).</p>
+      </div></div>
+      ${estado.chave ? '' : `<div class="cartao aviso-bloco">
+        <div><strong>Falta a chave da API</strong><p class="sub">A leitura usa o Claude com a sua própria chave da Anthropic. É só cadastrar uma vez.</p></div>
+        <button type="button" class="btn btn-primario" data-acao="abrir-chave">Cadastrar chave</button>
+      </div>`}
+      ${imp.erro ? `<p class="erro-bloco" role="alert">${esc(imp.erro)}</p>` : ''}
+      <div class="cartao bloco">
+        <div class="fotos">
+          ${fotos}
+          ${!lendo && imp.fotos.length < L.MAX_FOTOS ? `<button type="button" class="foto-nova" data-acao="escolher-fotos"${imp.preparando ? ' disabled' : ''}>
+            <span class="foto-nova-mais" aria-hidden="true">+</span>
+            <span>${imp.preparando ? 'Preparando…' : imp.fotos.length ? 'Adicionar página' : 'Tirar ou escolher foto'}</span>
+          </button>` : ''}
+        </div>
+        <input type="file" id="importar-fotos" accept="image/*" multiple data-campo="fotos" hidden>
+        <p class="dica">A leitura usa o Claude Opus 5.5 com a sua chave: cerca de US$ 0,05 a 0,10 por receita. As fotos vão para a Anthropic só para a leitura e não ficam guardadas no app.</p>
+      </div>
+      ${lendo ? `<div class="cartao lendo" role="status">
+        <span class="girando" aria-hidden="true"></span>
+        <div><strong>Lendo a receita…</strong><p class="sub">Costuma levar de 20 segundos a 1 minuto.</p></div>
+      </div>` : ''}
+      <div class="barra-salvar">
+        <span class="barra-resumo">${imp.fotos.length ? `<strong>${imp.fotos.length}</strong> ${plural(imp.fotos.length, 'foto', 'fotos')}` : 'Nenhuma foto ainda'}</span>
+        <div class="acoes">
+          ${lendo
+            ? '<button type="button" class="btn" data-acao="cancelar-leitura">Cancelar leitura</button>'
+            : `<button type="button" class="btn" data-acao="cancelar-importacao">Cancelar</button>
+               <button type="button" class="btn btn-primario" data-acao="ler-fotos"${podeLer ? '' : ' disabled'}>Ler receita</button>`}
+        </div>
+      </div>
+    </section>`;
+  }
+
+  /** Reduz a foto no próprio aparelho: menos dados para enviar e custo menor por leitura. */
+  function prepararImagem(arquivo) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(arquivo);
+      const img = new Image();
+      const desenhar = (ladoMaximo, qualidade) => {
+        const escala = Math.min(1, ladoMaximo / Math.max(img.naturalWidth, img.naturalHeight));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.naturalWidth * escala));
+        canvas.height = Math.max(1, Math.round(img.naturalHeight * escala));
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff'; // fundo para PNG transparente
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL('image/jpeg', qualidade);
+      };
+      img.onload = () => {
+        try {
+          const completa = desenhar(L.LADO_MAXIMO, 0.85);
+          resolve({ base64: completa.slice(completa.indexOf(',') + 1), tipo: 'image/jpeg', miniatura: desenhar(320, 0.7) });
+        } catch (erro) {
+          reject(erro);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('imagem'));
+      };
+      img.src = url;
+    });
+  }
+
+  async function adicionarFotos(arquivos) {
+    const imp = estado.importacao;
+    if (!imp || !arquivos || !arquivos.length) return;
+    const livres = L.MAX_FOTOS - imp.fotos.length;
+    const lista = Array.from(arquivos).slice(0, livres);
+    if (arquivos.length > livres) avisar(`Use até ${L.MAX_FOTOS} fotos por receita.`);
+    imp.preparando = true;
+    imp.erro = '';
+    render();
+    for (const arquivo of lista) {
+      try {
+        imp.fotos.push({ chave: novaChave(), ...(await prepararImagem(arquivo)) });
+      } catch (erro) {
+        imp.erro = `Não consegui abrir “${arquivo.name}”. Use uma foto em JPG ou PNG.`;
+      }
+    }
+    imp.preparando = false;
+    if (estado.importacao === imp) render();
+  }
+
+  async function lerFotos() {
+    const imp = estado.importacao;
+    if (!imp || !imp.fotos.length || !estado.chave || imp.etapa === 'lendo') return;
+    imp.etapa = 'lendo';
+    imp.erro = '';
+    imp.controle = new AbortController();
+    render();
+    try {
+      const leitura = await L.lerReceita({
+        chave: estado.chave,
+        imagens: imp.fotos,
+        ingredientes: dados.ingredientes,
+        signal: imp.controle.signal,
+      });
+      if (estado.importacao !== imp) return;
+      if (!leitura.ehReceita) {
+        imp.etapa = 'fotos';
+        imp.erro = 'Não encontrei uma receita nas fotos' + (leitura.problema ? `: ${leitura.problema}` : '.');
+      } else {
+        imp.revisao = montarRevisao(leitura);
+        imp.etapa = 'revisao';
+        window.scrollTo(0, 0);
+      }
+    } catch (erro) {
+      if (estado.importacao !== imp) return;
+      imp.etapa = 'fotos';
+      imp.erro = erro.codigo === 'cancelada' ? '' : erro.message;
+    } finally {
+      imp.controle = null;
+    }
+    render();
+  }
+
+  function montarRevisao(leitura) {
+    return {
+      nome: leitura.nome,
+      rendQtd: leitura.rendimento.qtd ? C.formatarCampo(leitura.rendimento.qtd) : '',
+      rendUnidade: leitura.rendimento.unidade,
+      preparo: leitura.preparo,
+      tempo: leitura.tempo,
+      observacoes: leitura.observacoes,
+      linhas: leitura.linhas.map((l) => ({
+        chave: novaChave(),
+        bruto: l.bruto,
+        escolha: l.ingredienteId || '__novo',
+        tipoNovo: l.tipoNovo,
+        qtd: l.qtd != null ? C.formatarCampo(l.qtd) : '',
+        unidade: l.unidade,
+        origem: l.origem,
+        medida: l.medida,
+        qtdEditada: false,
+      })),
+    };
+  }
+
+  function nomeNovo(linha) {
+    const nome = linha.bruto.nome.trim();
+    return nome.charAt(0).toLocaleUpperCase('pt-BR') + nome.slice(1);
+  }
+
+  function precisaConferir(linha) {
+    return !linha.qtdEditada && ['estimada', 'sem-quantidade', 'tipo-diferente'].includes(linha.origem);
+  }
+
+  /** Recalcula a quantidade quando a pessoa troca o ingrediente ou o tipo (se ela não digitou outra). */
+  function reconverterLinha(linha) {
+    const ing = linha.escolha !== '__novo' ? ingrediente(linha.escolha) : null;
+    const tipo = ing ? ing.tipo : linha.tipoNovo;
+    if (linha.qtdEditada) {
+      if (C.tipoDaUnidade(linha.unidade) !== tipo) linha.unidade = C.TIPOS[tipo].menor;
+      return;
+    }
+    const r = L.resolverQuantidade(linha.bruto, ing, linha.tipoNovo);
+    linha.qtd = r.qtd != null ? C.formatarCampo(r.qtd) : '';
+    linha.unidade = r.unidade;
+    linha.origem = r.origem;
+    linha.medida = r.medida;
+  }
+
+  function statusLinhaHtml(linha) {
+    const ing = linha.escolha !== '__novo' ? ingrediente(linha.escolha) : null;
+    const cadastro = ing
+      ? '<span class="chip chip-ok">No cadastro</span>'
+      : `<span class="chip">Novo, sem preço (${esc(C.TIPOS[linha.tipoNovo].nome.toLowerCase())})</span>`;
+    let origem = '';
+    if (linha.qtdEditada) origem = '<span class="dica">Quantidade ajustada por você</span>';
+    else {
+      const explicacao = L.explicarOrigem(linha);
+      if (explicacao) origem = `<span class="${precisaConferir(linha) ? 'chip chip-alerta' : 'dica'}">${esc(explicacao)}</span>`;
+    }
+    return cadastro + origem;
+  }
+
+  function linhaRevisaoHtml(linha) {
+    const ing = linha.escolha !== '__novo' ? ingrediente(linha.escolha) : null;
+    const tipo = ing ? ing.tipo : linha.tipoNovo;
+    const k = linha.chave;
+    return `<div class="rev-linha${precisaConferir(linha) ? ' rev-conferir' : ''}">
+      <p class="rev-lido">“${esc(linha.bruto.texto)}”${linha.bruto.observacao ? ` <span>· ${esc(linha.bruto.observacao)}</span>` : ''}</p>
+      <div class="rev-campos${ing ? '' : ' rev-novo'}">
+        <select id="rev-ing-${k}" data-linha="escolha" data-chave="${k}" aria-label="Ingrediente para “${esc(linha.bruto.nome)}”">
+          <option value="__novo"${ing ? '' : ' selected'}>+ Criar “${esc(nomeNovo(linha))}”</option>
+          ${porNome(dados.ingredientes).map((o) => `<option value="${esc(o.id)}"${ing && o.id === ing.id ? ' selected' : ''}>${esc(o.nome)}</option>`).join('')}
+        </select>
+        ${ing ? '' : `<select id="rev-tipo-${k}" data-linha="tipoNovo" data-chave="${k}" aria-label="Como “${esc(nomeNovo(linha))}” é medido">${Object.entries(C.TIPOS).map(([t, d]) => `<option value="${t}"${t === linha.tipoNovo ? ' selected' : ''}>${d.nome}</option>`).join('')}</select>`}
+        <input id="rev-qtd-${k}" data-linha="qtd" data-chave="${k}" inputmode="decimal" autocomplete="off" value="${esc(linha.qtd)}" placeholder="?" aria-label="Quantidade de ${esc(linha.bruto.nome)}" class="${linha.qtd ? '' : 'falta'}">
+        <select id="rev-un-${k}" data-linha="unidade" data-chave="${k}" aria-label="Unidade">${C.unidadesDoTipo(tipo).map((u) => `<option${u === linha.unidade ? ' selected' : ''}>${u}</option>`).join('')}</select>
+        <button type="button" class="icone" data-acao="remover-linha-revisao" data-chave="${k}" aria-label="Tirar ${esc(linha.bruto.nome)} da receita">×</button>
+      </div>
+      <p class="rev-status" id="rev-status-${k}">${statusLinhaHtml(linha)}</p>
+    </div>`;
+  }
+
+  function telaRevisao() {
+    const rv = estado.importacao.revisao;
+    const novos = rv.linhas.filter((l) => l.escolha === '__novo').length;
+    const conferir = rv.linhas.filter(precisaConferir).length;
+    const noCadastro = rv.linhas.length - novos;
+    const v = (campo) => esc(rv[campo]);
+    return `<section class="painel">
+      <div class="painel-cabeca"><div>
+        <button type="button" class="voltar" data-acao="cancelar-importacao">← Receitas</button>
+        <h1>Revisar receita lida</h1>
+        <p class="sub">Confira o que foi lido nas fotos. Depois a receita abre no editor para os últimos ajustes, e só é salva quando você mandar.</p>
+      </div></div>
+      <div class="resumo-chips" id="rev-resumo">${resumoRevisaoHtml(noCadastro, novos, conferir)}</div>
+      <div class="editor-grade">
+        <section class="cartao bloco">
+          <div class="dados-receita">
+            <label class="campo"><span>Nome da receita</span>
+              <input id="rev-nome" data-rev="nome" value="${v('nome')}" placeholder="Ex.: Bolo de cenoura" autocomplete="off" maxlength="200"></label>
+            <div class="campo"><span>Rendimento</span>
+              <div class="linha-campos">
+                <input id="rev-rend-qtd" data-rev="rendQtd" inputmode="decimal" autocomplete="off" value="${v('rendQtd')}" placeholder="—" aria-label="Quanto a receita rende">
+                <input id="rev-rend-unidade" data-rev="rendUnidade" value="${v('rendUnidade')}" placeholder="unidades" aria-label="Unidade do rendimento" maxlength="60" autocomplete="off">
+              </div></div>
+          </div>
+        </section>
+        <section class="cartao bloco">
+          <div class="bloco-cabeca"><h2>Ingredientes</h2><span class="dica">Entre aspas, o que estava escrito na receita.</span></div>
+          <div class="rev-linhas">${rv.linhas.map(linhaRevisaoHtml).join('') || '<p class="dica">Nenhum ingrediente lido.</p>'}</div>
+        </section>
+        ${rv.preparo || rv.tempo || rv.observacoes ? `<section class="cartao preparo">
+          <h2>Modo de preparo</h2>
+          ${rv.preparo ? `<div class="preparo-texto">${esc(rv.preparo)}</div>` : ''}
+          ${rv.tempo || rv.observacoes ? `<div class="obs-bloco"><h3>Obs</h3>
+            ${rv.tempo ? `<div class="obs-linha"><span>Tempo de produção</span><span>${esc(rv.tempo)}</span></div>` : ''}
+            ${rv.observacoes ? `<div class="obs-linha"><span>Observações</span><span class="preparo-texto">${esc(rv.observacoes)}</span></div>` : ''}
+          </div>` : ''}
+          <p class="dica">O texto pode ser editado no próximo passo.</p>
+        </section>` : ''}
+      </div>
+      <div class="barra-salvar">
+        <span class="barra-resumo">${novos ? `${novos} ${plural(novos, 'ingrediente novo será criado', 'ingredientes novos serão criados')} sem preço` : 'Todos os ingredientes já estão no cadastro'}</span>
+        <div class="acoes">
+          <button type="button" class="btn" data-acao="cancelar-importacao">Descartar</button>
+          <button type="button" class="btn btn-primario" data-acao="continuar-importacao">Continuar para o editor</button>
+        </div>
+      </div>
+    </section>`;
+  }
+
+  function resumoRevisaoHtml(noCadastro, novos, conferir) {
+    return [
+      `<span class="chip chip-ok">${noCadastro} no cadastro</span>`,
+      novos ? `<span class="chip">${novos} ${plural(novos, 'novo', 'novos')}</span>` : '',
+      conferir ? `<span class="chip chip-alerta">${conferir} para conferir</span>` : '',
+    ].join('');
+  }
+
+  function linhaDaChave(chave) {
+    const rv = estado.importacao && estado.importacao.revisao;
+    return rv ? rv.linhas.find((l) => l.chave === chave) : null;
+  }
+
+  /** Cria os ingredientes novos e abre o editor de receita já preenchido. */
+  function continuarImportacao() {
+    const rv = estado.importacao.revisao;
+    const criados = [];
+    const itens = rv.linhas.map((linha) => {
+      // Um ingrediente escolhido pode ter sido excluído no painel 1 durante a revisão.
+      let id = linha.escolha !== '__novo' && ingrediente(linha.escolha) ? linha.escolha : '__novo';
+      if (id === '__novo') {
+        const nome = nomeNovo(linha);
+        const existente = dados.ingredientes.find((i) => normalizar(i.nome) === normalizar(nome));
+        if (existente) {
+          id = existente.id;
+        } else {
+          const novo = { id: D.novoId('ing'), nome, tipo: linha.tipoNovo, precos: [], medidas: {}, exemplo: false };
+          dados.ingredientes.push(novo);
+          criados.push(novo);
+          id = novo.id;
+        }
+      }
+      const ing = ingrediente(id);
+      const unidade = C.tipoDaUnidade(linha.unidade) === ing.tipo ? linha.unidade : C.TIPOS[ing.tipo].menor;
+      return { chave: novaChave(), ingredienteId: id, qtd: linha.qtd, unidade };
+    });
+    if (criados.length) salvarDados();
+    estado.receita = {
+      id: null,
+      nome: rv.nome,
+      rendQtd: rv.rendQtd,
+      rendUnidade: rv.rendUnidade,
+      itens: itens.length ? itens : [itemVazio()],
+      preparo: rv.preparo,
+      obsTempo: rv.tempo,
+      obsEspacoQtd: '',
+      obsEspacoDesc: '',
+      obsTexto: rv.observacoes,
+      erros: {},
+      alterado: true,
+    };
+    estado.importacao = null;
+    render();
+    window.scrollTo(0, 0);
+    avisar(criados.length
+      ? `${criados.length} ${plural(criados.length, 'ingrediente novo criado', 'ingredientes novos criados')} sem preço. Confira e salve a receita.`
+      : 'Confira e salve a receita.');
+  }
+
+  /* ---------- Chave da API ---------- */
+
+  function mascararChave(chave) {
+    return chave.length > 16 ? chave.slice(0, 10) + '…' + chave.slice(-4) : '…';
+  }
+
+  function abrirChave() {
+    const chave = estado.chave;
+    $('#dlg-chave').innerHTML = `<form class="dlg-form" data-form="chave" novalidate>
+      <header class="dlg-cabeca">
+        <h2 id="dlg-chave-titulo">Leitura de receitas por foto</h2>
+        <button type="button" class="icone" data-acao="fechar-dialogo" aria-label="Fechar">×</button>
+      </header>
+      <div class="dlg-corpo">
+        <p>A leitura usa o Claude, da Anthropic, com a sua própria chave de API. A conta da API é separada da assinatura do app Claude e funciona com créditos pré-pagos.</p>
+        <ol class="passos">
+          <li>Entre em <a href="https://platform.claude.com/" target="_blank" rel="noopener">platform.claude.com</a> e adicione créditos à conta.</li>
+          <li>Em “API Keys”, crie uma chave e cole abaixo.</li>
+          <li>Por segurança, defina um limite de gasto mensal na conta (por exemplo, US$ 5).</li>
+        </ol>
+        <p class="dica">Custo estimado: US$ 0,05 a 0,10 por receita lida, com o modelo Claude Opus 5.5.</p>
+        ${chave ? `<p>Chave salva: <span class="num">${esc(mascararChave(chave))}</span></p>` : ''}
+        <label class="campo"><span>${chave ? 'Trocar por outra chave' : 'Chave da API'}</span>
+          <input id="chave-api" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…"></label>
+        <p class="dica">A chave fica salva só neste navegador e não vai no arquivo de backup. Quem usar este navegador consegue vê-la.</p>
+        <p class="erro-msg" id="chave-erro" hidden></p>
+      </div>
+      <footer class="dlg-rodape">
+        ${chave ? '<button type="button" class="btn btn-perigo esquerda" data-acao="remover-chave">Remover chave</button>' : ''}
+        <button type="button" class="btn" data-acao="fechar-dialogo">Cancelar</button>
+        <button type="submit" class="btn btn-primario" id="chave-salvar">Testar e salvar</button>
+      </footer>
+    </form>`;
+    abrirDialogo('#dlg-chave');
+    $('#chave-api').focus();
+  }
+
+  async function salvarChave() {
+    const chave = $('#chave-api').value.trim();
+    const erro = $('#chave-erro');
+    const botao = $('#chave-salvar');
+    const mostrarErro = (mensagem) => {
+      erro.textContent = mensagem;
+      erro.hidden = false;
+      $('#chave-api').classList.add('invalido');
+      $('#chave-api').focus();
+    };
+    if (!chave) return mostrarErro('Cole a chave da API.');
+    if (!/^sk-ant-/.test(chave)) return mostrarErro('A chave da Anthropic começa com “sk-ant-”. Confira se copiou a chave inteira.');
+    botao.disabled = true;
+    botao.textContent = 'Testando…';
+    let aviso = 'Chave testada e salva';
+    try {
+      await L.testarChave(chave);
+    } catch (e) {
+      if (['chave', 'permissao', 'modelo'].includes(e.codigo)) {
+        botao.disabled = false;
+        botao.textContent = 'Testar e salvar';
+        return mostrarErro(e.message);
+      }
+      // Sem conexão ou serviço instável: guarda a chave e avisa que não foi testada.
+      aviso = 'Chave salva sem teste: ' + e.message;
+    }
+    estado.chave = chave;
+    D.salvarChaveApi(chave);
+    fecharDialogo('#dlg-chave');
+    render();
+    avisar(aviso);
+  }
+
+  async function removerChave() {
+    const ok = await confirmar({
+      titulo: 'Remover a chave da API?',
+      texto: 'A leitura por foto para de funcionar neste navegador até você cadastrar uma chave de novo.',
+      botao: 'Remover',
+      perigo: true,
+    });
+    if (!ok) return;
+    estado.chave = '';
+    D.salvarChaveApi('');
+    fecharDialogo('#dlg-chave');
+    render();
+    avisar('Chave removida');
   }
 
   /* =====================================================================
@@ -1441,6 +1902,7 @@
           <button type="button" class="btn so-local" data-acao="exportar">Baixar backup (.json)</button>
           <button type="button" class="btn" data-acao="importar">Importar backup…</button>
           <input type="file" id="arquivo-backup" accept=".json,application/json" data-campo="importar" hidden>
+          <button type="button" class="btn so-local" data-acao="abrir-chave">Leitura por foto: ${estado.chave ? 'chave cadastrada' : 'cadastrar chave da API'}</button>
           ${temExemplos()
             ? '<button type="button" class="btn" data-acao="apagar-exemplos">Apagar dados de exemplo</button>'
             : '<button type="button" class="btn" data-acao="carregar-exemplo">Carregar o exemplo do croissant</button>'}
@@ -1609,6 +2071,32 @@
         break;
       }
 
+      // Leitura por foto
+      case 'abrir-importacao': abrirImportacao(); break;
+      case 'cancelar-importacao': cancelarImportacao(); break;
+      case 'escolher-fotos': $('#importar-fotos').click(); break;
+      case 'remover-foto': {
+        const imp = estado.importacao;
+        imp.fotos = imp.fotos.filter((f) => f.chave !== el.dataset.chave);
+        render();
+        break;
+      }
+      case 'ler-fotos': lerFotos(); break;
+      case 'cancelar-leitura': {
+        const imp = estado.importacao;
+        if (imp && imp.controle) imp.controle.abort();
+        break;
+      }
+      case 'remover-linha-revisao': {
+        const rv = estado.importacao.revisao;
+        rv.linhas = rv.linhas.filter((l) => l.chave !== el.dataset.chave);
+        render();
+        break;
+      }
+      case 'continuar-importacao': continuarImportacao(); break;
+      case 'abrir-chave': fecharDialogo('#dlg-dados'); abrirChave(); break;
+      case 'remover-chave': removerChave(); break;
+
       // Produção
       case 'produzir': produzir(id); break;
       case 'trocar-receita': estado.producaoId = null; salvarTela(); render(); break;
@@ -1673,6 +2161,9 @@
       estado.receita.alterado = true;
       delete estado.receita.erros['item-' + d.chave];
       atualizarCalculosEditor();
+    } else if (d.ingMedida && estado.ingrediente) {
+      estado.ingrediente.medidas[d.ingMedida] = alvo.value;
+      $('#ing-erro').hidden = true;
     } else if (d.ing && estado.ingrediente) {
       estado.ingrediente[d.ing] = alvo.value;
       if (d.ing !== 'nome') {
@@ -1680,6 +2171,21 @@
         $('#ing-calc').innerHTML = calcIngredienteHtml();
       }
       $('#ing-erro').hidden = true;
+    } else if (d.rev && estado.importacao && estado.importacao.revisao) {
+      estado.importacao.revisao[d.rev] = alvo.value;
+    } else if (d.linha === 'qtd') {
+      const linha = linhaDaChave(d.chave);
+      if (!linha) return;
+      linha.qtd = alvo.value;
+      linha.qtdEditada = true;
+      document.getElementById('rev-status-' + d.chave).innerHTML = statusLinhaHtml(linha);
+      alvo.classList.toggle('falta', !alvo.value.trim());
+      alvo.closest('.rev-linha').classList.remove('rev-conferir');
+      const rv = estado.importacao.revisao;
+      const novos = rv.linhas.filter((l) => l.escolha === '__novo').length;
+      $('#rev-resumo').innerHTML = resumoRevisaoHtml(rv.linhas.length - novos, novos, rv.linhas.filter(precisaConferir).length);
+    } else if (alvo.id === 'chave-api') {
+      $('#chave-erro').hidden = true;
     } else if (d.aj === 'valor' && estado.ajuste) {
       estado.ajuste.valor = alvo.value;
       $('#aj-erro').hidden = true;
@@ -1719,6 +2225,21 @@
     } else if (d.campo === 'importar') {
       importar(alvo.files && alvo.files[0]);
       alvo.value = '';
+    } else if (d.campo === 'fotos') {
+      const arquivos = Array.from(alvo.files || []);
+      alvo.value = '';
+      adicionarFotos(arquivos);
+    } else if (d.linha && d.linha !== 'qtd') {
+      const linha = linhaDaChave(d.chave);
+      if (!linha) return;
+      if (d.linha === 'escolha' || d.linha === 'tipoNovo') {
+        linha[d.linha] = alvo.value;
+        reconverterLinha(linha);
+      } else if (d.linha === 'unidade') {
+        linha.unidade = alvo.value;
+        linha.qtdEditada = true;
+      }
+      render();
     } else if (d.item === 'ingredienteId') {
       const item = itemDaChave(d.chave);
       if (!item) return;
@@ -1780,6 +2301,7 @@
     const formulario = e.target.dataset.form;
     if (formulario === 'ingrediente') salvarIngrediente();
     else if (formulario === 'ajuste') aplicarAjuste();
+    else if (formulario === 'chave') salvarChave();
   });
 
   window.addEventListener('hashchange', () => {

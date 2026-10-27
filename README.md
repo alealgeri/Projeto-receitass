@@ -24,6 +24,7 @@ O custo de compra de cada ingrediente, atualizado uma vez por mês.
 - **Histórico mensal:** cada mês guarda o seu preço, com a variação em relação ao mês anterior.
 - **Atualizar preços do mês:** uma tela com todos os ingredientes para digitar os preços novos. O botão “Manter” repete o preço anterior quando ele não mudou.
 - Ingredientes sem preço do mês atual aparecem como **Pendente**.
+- **Medidas caseiras (opcional):** quanto pesa 1 xícara, 1 colher de sopa e 1 colher de chá daquele ingrediente (ex.: 1 xícara de farinha = 120 g). São usadas na leitura de receitas por foto.
 
 ### 2. Receitas
 
@@ -38,6 +39,30 @@ Onde cada receita é cadastrada (ex.: croissant).
   - **Observações:** texto livre.
 
   Campos vazios não aparecem na produção.
+
+#### Ler receita de foto
+
+Em **Receitas → Ler receita de foto**, tire ou escolha a foto da receita (até 4 fotos, para receitas em mais de uma página). O Claude, da Anthropic, lê a receita e o app mostra uma tela de revisão antes de qualquer coisa ser salva:
+
+- cada ingrediente lido é ligado ao seu cadastro do painel 1 (“farinha” → “Farinha de trigo T55”) ou marcado como **novo**, para ser criado sem preço;
+- medidas caseiras viram g ou ml. Se o ingrediente tem a sua medida cadastrada, vale a sua; senão, vale uma estimativa do Claude, marcada **para conferir**;
+- “a gosto”, “pitada” e outras quantidades indefinidas ficam em branco para você preencher.
+
+Depois da revisão, a receita abre no editor, já com o custo calculado, e só é salva quando você clicar em **Salvar receita**.
+
+**O que é preciso:**
+
+- Uma conta na API da Anthropic, em [platform.claude.com](https://platform.claude.com/), com créditos pré-pagos. É separada da assinatura do app Claude.
+- Uma chave de API (“API Keys”), cadastrada em **Dados e backup → Leitura por foto**. O app testa a chave antes de salvar, sem gastar créditos.
+- Internet no momento da leitura.
+
+**Custo:** cerca de US$ 0,05 a 0,10 por receita lida, com o modelo Claude Opus 5.5. Convém definir um limite de gasto mensal na conta da API.
+
+**Privacidade e segurança:**
+
+- As fotos são reduzidas no próprio aparelho, enviadas à Anthropic só para a leitura e não ficam guardadas no app.
+- A chave fica salva só no navegador (fora do arquivo de backup). Quem usar o mesmo navegador consegue vê-la. No GitHub Pages, outras páginas publicadas na mesma conta do GitHub (`<usuário>.github.io`) também conseguiriam lê-la.
+- A leitura não funciona na prévia publicada dentro do Claude, que bloqueia chamadas externas. Use pelo GitHub Pages ou abrindo o `index.html`.
 
 ### 3. Produção
 
@@ -72,15 +97,16 @@ Limpar os dados do navegador apaga as receitas, por isso convém baixar um backu
 
 ## Para desenvolvedores
 
-HTML, CSS e JavaScript puro, sem dependências nem etapa de build.
+HTML, CSS e JavaScript puro, sem etapa de build. A única dependência é o SDK oficial da Anthropic (`@anthropic-ai/sdk`, versão fixa), carregado da CDN jsDelivr só quando alguém lê uma foto.
 
 ```
 index.html          estrutura da página
 css/estilo.css      estilo (tema claro e escuro, celular)
 js/calculos.js      cálculos puros: unidades, preços, custos, produção e ajustes
+js/leitura.js       leitura por foto: pedido ao Claude, formato da resposta e conversão de medidas
 js/dados.js         armazenamento, exemplo do croissant e validação de backup
 js/app.js           telas e eventos
-tests/              testes dos cálculos
+tests/              testes dos cálculos e da interpretação da leitura
 ```
 
 Testes (Node 18 ou mais recente):

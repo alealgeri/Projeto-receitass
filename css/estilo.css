@@ -251,7 +251,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .campo { display: grid; gap: 6px; min-width: 0; border: 0; margin: 0; padding: 0; }
 .campo > span, .campo > label, .campo > legend { font-size: 0.85rem; font-weight: 600; padding: 0; }
 .campo small, .dica { color: var(--tinta-suave); font-size: 0.8rem; }
-.entrada, .campo input, .campo select, .campo textarea, .grupo input, .grupo select {
+.entrada, .campo input, .campo select, .campo textarea, .grupo input, .grupo select,
+.item input, .item select, .rev-campos input, .rev-campos select {
   width: 100%;
   min-height: 40px;
   padding: 8px 10px;
@@ -264,6 +265,7 @@ textarea { resize: vertical; line-height: 1.55; }
 input::placeholder, textarea::placeholder { color: var(--tinta-suave); opacity: 0.75; }
 input[inputmode="decimal"] { font-family: var(--fonte-numero); font-variant-numeric: tabular-nums; }
 .invalido, input.invalido { border-color: var(--erro) !important; background: var(--erro-suave) !important; }
+input.falta { border-color: var(--alerta); border-style: dashed; }
 .linha-campos { display: grid; grid-template-columns: minmax(0, 7rem) minmax(0, 1fr); gap: 8px; }
 
 .grupo {
@@ -278,8 +280,9 @@ input[inputmode="decimal"] { font-family: var(--fonte-numero); font-variant-nume
 .grupo:focus-within { outline: 2px solid var(--foco); outline-offset: 1px; }
 .grupo input, .grupo select { border: 0; border-radius: 0; min-width: 0; }
 .grupo input:focus-visible, .grupo select:focus-visible { outline: none; }
-.grupo select { width: auto; background: var(--superficie-2); border-left: 1px solid var(--linha); }
+.grupo select { flex: none; width: auto; background: var(--superficie-2); border-left: 1px solid var(--linha); }
 .grupo-txt {
+  flex: none;
   display: flex;
   align-items: center;
   padding: 0 10px;
@@ -564,6 +567,81 @@ input[inputmode="decimal"] { font-family: var(--fonte-numero); font-variant-nume
 .obs-linha { display: grid; grid-template-columns: 9rem minmax(0, 1fr); gap: 4px 12px; }
 .obs-linha > span:first-child { font-size: 0.85rem; font-weight: 600; color: var(--tinta-suave); }
 
+/* ---------- Leitura por foto ---------- */
+
+.fotos { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: 12px; }
+.foto { position: relative; display: grid; gap: 6px; margin: 0; min-width: 0; }
+.foto img {
+  width: 100%;
+  max-width: 100%;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border: 1px solid var(--linha);
+  border-radius: var(--raio-p);
+  background: var(--superficie-2);
+}
+.foto figcaption { font-size: 0.8rem; color: var(--tinta-suave); }
+.foto-remover { position: absolute; top: 6px; right: 6px; background: var(--superficie); border-color: var(--linha); box-shadow: var(--sombra); }
+.foto-nova {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 6px;
+  max-width: 100%;
+  aspect-ratio: 3 / 4;
+  padding: 12px;
+  border: 2px dashed var(--linha-forte);
+  border-radius: var(--raio-p);
+  background: var(--superficie-2);
+  color: var(--tinta);
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+}
+.foto-nova:hover { border-color: var(--manteiga-borda); }
+.foto-nova:disabled { cursor: progress; opacity: 0.6; }
+.foto-nova-mais { font-size: 2rem; line-height: 1; color: var(--manteiga-tinta); }
+
+.aviso-bloco {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  padding: 16px 18px;
+  background: var(--manteiga-suave);
+  border-color: transparent;
+}
+.erro-bloco { padding: 12px 16px; border-radius: var(--raio-p); background: var(--erro-suave); color: var(--erro); font-weight: 500; }
+.lendo { display: flex; align-items: center; gap: 14px; padding: 16px 18px; }
+.girando {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--manteiga-suave);
+  border-top-color: var(--manteiga);
+  border-radius: 50%;
+  animation: girar 0.9s linear infinite;
+}
+@keyframes girar { to { transform: rotate(360deg); } }
+
+.resumo-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.rev-linhas { display: grid; }
+.rev-linha { display: grid; gap: 6px; padding-block: 12px; border-top: 1px solid var(--linha); min-width: 0; }
+.rev-linha:first-child { border-top: 0; padding-top: 0; }
+.rev-lido { font-size: 0.85rem; font-style: italic; color: var(--tinta-suave); overflow-wrap: anywhere; }
+.rev-campos { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.rev-campos > select:first-child { flex: 2 1 12rem; width: auto; min-width: 0; }
+.rev-campos > select[data-linha="tipoNovo"] { flex: 1 1 7rem; width: auto; min-width: 0; }
+.rev-campos > input { flex: 0 0 6rem; width: 6rem; }
+.rev-campos > select[data-linha="unidade"] { flex: 0 0 4.8rem; width: 4.8rem; }
+.rev-campos > .icone { flex: none; }
+.rev-status { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+.medidas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.medida { display: grid; gap: 4px; font-size: 0.85rem; min-width: 0; }
+.passos { display: grid; gap: 4px; margin: 0; padding-left: 1.25rem; }
+
 /* ---------- Vazio ---------- */
 
 .vazio { display: grid; justify-items: start; gap: 10px; padding: 28px 22px; }
@@ -663,6 +741,19 @@ input[inputmode="decimal"] { font-family: var(--fonte-numero); font-variant-nume
   .topo-in .btn { padding-inline: 10px; font-size: 0.85rem; }
   .item { grid-template-areas: "ing ing ing rem" "qtd un un un" "calc calc calc calc" "parte parte parte parte"; }
   .linha-emb { grid-template-columns: minmax(0, 1fr); }
+  .medidas { grid-template-columns: minmax(0, 1fr); }
+  .rev-campos {
+    display: grid;
+    grid-template-columns: 5.5rem 4.6rem minmax(0, 1fr) 36px;
+    grid-template-areas: "ing ing ing rem" "qtd un . .";
+  }
+  .rev-campos.rev-novo { grid-template-areas: "ing ing ing rem" "qtd un tipo tipo"; }
+  .rev-campos > * { width: 100% !important; }
+  .rev-campos > select:first-child { grid-area: ing; }
+  .rev-campos > select[data-linha="tipoNovo"] { grid-area: tipo; }
+  .rev-campos > input { grid-area: qtd; }
+  .rev-campos > select[data-linha="unidade"] { grid-area: un; }
+  .rev-campos > .icone { grid-area: rem; width: 36px !important; }
   .tabela th, .tabela td { padding: 8px 10px; }
   .tabela .col-det { display: none; }
   .det-estreito {
